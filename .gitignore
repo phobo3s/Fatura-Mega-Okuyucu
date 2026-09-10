@@ -1,0 +1,26 @@
+# mega_launcher.bat / build_temp_data.ps1 tarafından her açılışta üretilen
+# geçici dosyalar — asla depoya girmemeli (kullanıcının gerçek faturalarının
+# base64'ü ve yerel kural kopyası bunların içinde olur)
+temp_files.js
+temp_config.js
+filelist.json
+
+# Inno Setup çıktısı
+Output/
+*.exe
+
+# Gerçek fatura PDF'leri — kişisel/ticari veri içerir, ASLA commit edilmez
+ornek_pdfler_e-smm/
+Örnek faturalar/
+ornek_faturalar/
+*.pdf
+
+# launcher hata günlüğü
+launcher_error.log
+
+# editör/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/

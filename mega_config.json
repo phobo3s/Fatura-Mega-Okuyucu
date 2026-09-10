@@ -1,0 +1,57 @@
+[
+  {
+    "id": "faturaNo",
+    "label": "Fatura No",
+    "regex": "(?:Fatura\\s*No|E-Arşiv\\s*Fatura\\s*No)\\s*[:\\s]*([A-Z0-9]{13,16})"
+  },
+  {
+    "id": "tarih",
+    "label": "Tarih",
+    "regex": "(?:Düzenleme\\s*Tarihi|Fatura\\s*Tarihi)\\s*[:\\s]*(\\d{2}\\s*[\\/\\.-]\\s*\\d{2}\\s*[\\/\\.-]\\s*\\d{4})"
+  },
+  {
+    "id": "vkn",
+    "label": "VKN/TCKN (Satıcı)",
+    "regex": "(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*(\\d{10,11})"
+  },
+  {
+    "id": "avkn",
+    "label": "VKN/TCKN (Alıcı)",
+    "regex": "(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*\\d{10,11}[\\s\\S]*?(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*(\\d{10,11})"
+  },
+  {
+    "id": "senaryo",
+    "label": "Senaryo",
+    "regex": "Senaryo\\s*[:\\s]*([A-ZÇĞİÖŞÜ]+)"
+  },
+  {
+    "id": "faturaTipi",
+    "label": "Fatura Tipi",
+    "regex": "Fatura\\s*Tipi\\s*[:\\s]*([A-ZÇĞİÖŞÜ]+)"
+  },
+  {
+    "id": "paraBirimi",
+    "label": "Para Birimi",
+    "regex": "Ödenecek\\s*Tutar\\s*[:\\s]*[\\d\\.,]+\\s*(TL|TRY|EUR|USD|GBP)"
+  },
+  {
+    "id": "malHizmet",
+    "label": "Mal/Hizmet Toplamı",
+    "regex": "Mal\\s*(?:ve|\\/)?\\s*Hizmet\\s*Toplam\\s*(?:Tutarı)?\\s*[:\\s]*([\\d\\.,]+)"
+  },
+  {
+    "id": "vergiDahil",
+    "label": "Vergiler Dahil Toplam",
+    "regex": "Vergiler\\s*Dahil\\s*Toplam\\s*(?:Tutar[ıi]?)?\\s*[:\\s]*([\\d\\.,]+)"
+  },
+  {
+    "id": "odenecek",
+    "label": "Ödenecek Tutar",
+    "regex": "Ödenecek\\s*Tutar\\s*[:\\s]*([\\d\\.,]+)"
+  },
+  {
+    "id": "ettn",
+    "label": "ETTN",
+    "regex": "ETTN\\s*[:\\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+  }
+]

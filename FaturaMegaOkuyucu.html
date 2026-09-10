@@ -1,0 +1,2474 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fatura Mega Okuyucu (QR + Regex)</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="jsqr.standalone.js"></script>
+  <!-- ZXing: jsQR bulamazsa devreye giren, daha güçlü (ama daha yavaş) ikinci
+       karekod motoru. .wasm dosyasını ağdan çekmek yerine (file:// altında
+       fetch/XHR engellenebiliyor — jsQR'ı da bu yüzden standalone yapmıştık)
+       base64 olarak klasik <script src> ile taşıyoruz; hiç ağ/dosya erişimi
+       gerektirmiyor. Bkz. initZxing(). -->
+  <script src="zxing_reader_bundle.js"></script>
+  <script src="zxing_reader_wasm_b64.js"></script>
+  <!-- mega_launcher.bat tarafından her açılışta üretilir; ilk kurulumda henüz
+       yoksa 404 sessizce yutulur (klasik <script src>, fetch değil). -->
+  <script src="temp_config.js"></script>
+  <script src="temp_files.js"></script>
+  <style>
+    :root {
+      --bg-color: #f8fafc;
+      --card-bg: #ffffff;
+      --border-color: #e2e8f0;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --danger: #ef4444;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --text: #0f172a;
+      --text-muted: #64748b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg-color); color: var(--text); padding: 20px; font-size: 14px; }
+
+    .header { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 20px; color: var(--text); font-weight: 700; }
+    .header p { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+    .grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; transition: grid-template-columns 0.15s ease; }
+    .grid.rules-collapsed { grid-template-columns: auto 1fr; }
+
+    .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .card-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+    .card-title.clickable { cursor: pointer; user-select: none; }
+    .rules-toggle-icon { font-size: 11px; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
+
+    /* Regex Fallback Panel */
+    .field-rule { background: #f1f5f9; border-radius: 6px; padding: 10px; margin-bottom: 10px; border: 1px solid #cbd5e1; }
+    .field-rule label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; display: block; margin-bottom: 4px; }
+    .field-rule input { width: 100%; padding: 6px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 12px; margin-bottom: 6px; }
+    .field-rule input[type="text"].regex-input { font-family: monospace; background: #fff; }
+
+    .btn { background: var(--primary); color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+    .btn:hover { background: var(--primary-hover); }
+    .btn-secondary { background: #e2e8f0; color: var(--text); }
+    .btn-secondary:hover { background: #cbd5e1; }
+    .btn-sm { padding: 4px 8px; font-size: 11px; }
+
+    /* Drop Zone */
+    .drop-zone { border: 2px dashed #cbd5e1; border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; background: #fafafa; transition: all 0.2s; margin-bottom: 12px; }
+    .drop-zone:hover, .drop-zone.dragover { border-color: var(--primary); background: #eff6ff; }
+    /* Sonuç tablosu doluyken bırakma alanı devasa boş bir kutu gibi durmasın
+       diye ince bir şeride sıkışır; sürükleme sırasında yine tam boy açılır. */
+    .drop-zone.compact { padding: 8px 16px; }
+    .drop-zone.compact .drop-zone-full { display: none; }
+    .drop-zone.compact .drop-zone-compact-label { display: block; }
+    .drop-zone.compact.dragover { padding: 24px; }
+    .drop-zone.compact.dragover .drop-zone-full { display: block; }
+    .drop-zone.compact.dragover .drop-zone-compact-label { display: none; }
+    .drop-zone-compact-label { display: none; font-size: 12px; font-weight: 600; color: var(--primary); }
+
+    .scan-mode-toggle { display: flex; gap: 16px; font-size: 12px; color: var(--text); margin-bottom: 10px; }
+    .scan-mode-toggle label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+
+    #status-msg { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; min-height: 16px; }
+
+    /* Dynamic Table */
+    .table-container { overflow-x: auto; max-height: 460px; border: 1px solid var(--border-color); border-radius: 6px; }
+    /* "*" seçicisi font-family'yi her elemana (tr/td/th/b/span dahil) DOĞRUDAN
+       uyguluyor; "inherit" da işe yaramıyor çünkü zincirdeki tr de aynı şekilde
+       ele geçirilmiş — bu yüzden fontu her seviyede açıkça tekrar yazıyoruz. */
+    table, thead, tbody, tr, th, td { font-family: Consolas, "Bookman Old Style", "Courier New", monospace; }
+    table { width: 100%; border-collapse: collapse; text-align: right; font-size: 12px; }
+    th { background: #f8fafc; padding: 10px; border-bottom: 1px solid var(--border-color); font-weight: 600; position: sticky; top: 0; z-index: 10; white-space: nowrap; text-align: right; cursor: pointer; user-select: none; }
+    th:hover { background: #eef2f7; }
+    th .sort-indicator { font-size: 9px; color: var(--primary); margin-left: 3px; }
+    td { padding: 8px 10px; border-bottom: 1px solid var(--border-color); white-space: nowrap; text-align: right; }
+    tfoot td { padding: 8px 10px; background: #f1f5f9; border-top: 2px solid var(--border-color); position: sticky; bottom: 0; white-space: nowrap; text-align: right; }
+    td *, th * { font-family: Consolas, "Bookman Old Style", "Courier New", monospace; }
+    .filename-cell { display: block; max-width: var(--filename-col-width, 260px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .filename-width-control { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+    .filename-width-control input[type="range"] { width: 90px; }
+    tr:hover { background: #f1f5f9; cursor: pointer; }
+    tr.selected-row { background: #dbeafe; }
+    tr.row-error { background: #fef2f2; }
+    tr.row-error:hover { background: #fee2e2; }
+    tr.row-error.selected-row { background: #fecaca; }
+    .missing-data { color: var(--danger); font-style: italic; }
+    .not-applicable { color: var(--text-muted); text-align: center; }
+
+    .validation-box { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
+    .validation-box.validation-ok { background: #f1f5f9; border-color: #e2e8f0; color: #475569; }
+    .validation-box ul { margin: 6px 0 0 18px; list-style: none; }
+    .validation-box li { margin-bottom: 4px; }
+    .validation-box li.check-ok { color: #475569; }
+    .validation-box li.check-fail { color: #991b1b; font-weight: 600; }
+
+    .qr-locate-btn { padding: 1px 5px; font-size: 10px; margin-left: 4px; border-radius: 5px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; }
+    .qr-locate-btn:hover { background: #eff6ff; border-color: var(--primary); }
+
+    .rescan-btn { padding: 1px 5px; font-size: 10px; margin-left: 4px; border-radius: 5px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; }
+    .rescan-btn:hover { background: #eff6ff; border-color: var(--primary); }
+    #rescanMenu { display: none; position: fixed; z-index: 1100; background: #fff; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 8px 24px rgba(15,23,42,0.18); padding: 4px; min-width: 190px; }
+    #rescanMenu.open { display: block; }
+    #rescanMenu button { display: block; width: 100%; text-align: left; padding: 7px 10px; font-size: 12px; border: none; background: none; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+    #rescanMenu button:hover { background: #eff6ff; }
+
+    #qrPickerModal { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65); z-index: 1000; align-items: center; justify-content: center; }
+    #qrPickerModal.open { display: flex; }
+    .qr-picker-dialog { background: #fff; border-radius: 10px; padding: 16px; max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 10px; }
+    .qr-picker-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; font-size: 13px; }
+    #qrPickerCanvasWrap { position: relative; overflow: auto; max-width: 100%; max-height: 70vh; border: 1px solid var(--border-color); cursor: crosshair; line-height: 0; }
+    #qrPickerCanvas { display: block; max-width: none; }
+    #qrPickerSelectionBox { position: absolute; display: none; border: 2px dashed #2563eb; background: rgba(37, 99, 235, 0.15); pointer-events: none; }
+    .qr-picker-footer { display: flex; align-items: center; gap: 10px; }
+    .qr-picker-footer span { flex: 1; font-size: 12px; color: var(--text-muted); }
+
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+    .badge-qr { background: #d1fae5; color: #065f46; }
+    .badge-regex { background: #fef3c7; color: #92400e; }
+    .badge-none { background: #fee2e2; color: #991b1b; }
+    .badge-ok { background: #e2e8f0; color: #475569; }
+
+    /* Inspector */
+    .inspector { margin-top: 20px; }
+    .text-preview { font-family: monospace; font-size: 11px; white-space: pre-wrap; background: #0f172a; color: #f8fafc; padding: 12px; border-radius: 6px; height: 180px; overflow-y: auto; text-align: left; }
+    .text-preview .highlight { background-color: #f59e0b; color: #000; font-weight: bold; border-radius: 2px; padding: 0 2px; }
+    .qr-fields-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11.5px; text-align: left; }
+    .qr-fields-table tr:nth-child(even) { background: rgba(255, 255, 255, 0.035); }
+    .qr-fields-table tr:hover { background: rgba(96, 165, 250, 0.1); }
+    .qr-fields-table td { padding: 6px 10px; border-bottom: 1px solid #1e293b; text-align: left; vertical-align: top; line-height: 1.4; word-break: break-word; }
+    .qr-fields-table td:first-child { width: 42%; color: #93c5fd; font-weight: 600; }
+    .qr-fields-table td:last-child { color: #f1f5f9; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📄 Fatura Mega Okuyucu <span style="font-size:12px; font-weight:normal; color:var(--text-muted);">(QR + Regex)</span></h1>
+</div>
+<p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+  Her PDF için önce karekod (QR) aranır; QR bulunamazsa sayfa metni üzerinde regex ile alanlar çıkarılır.
+</p>
+
+<div class="grid">
+  <!-- Sol Panel: Regex Fallback Kuralları -->
+  <div class="card" id="rulesCard">
+    <div class="card-title clickable" onclick="toggleRulesPanel()">
+      <span>Regex Yedek Kuralları</span>
+      <span class="rules-toggle-icon" id="rulesToggleIcon">▼ Gizle</span>
+    </div>
+    <div id="rulesPanelBody">
+      <select id="rulesTypeSelect" style="width:100%; padding:6px; font-size:12px; margin-bottom:10px; border:1px solid var(--border-color); border-radius:6px;" onchange="switchRulesType(this.value)">
+        <option value="fatura">📄 e-Fatura Kuralları</option>
+        <option value="esmm">🧾 Serbest Meslek Makbuzu Kuralları</option>
+      </select>
+      <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;" id="rulesPanelDesc">
+        Bu kurallar sadece QR bulunamayan dosyalarda kullanılır. Alan adları sabittir, sadece deseni düzenleyebilirsiniz.
+      </p>
+      <div id="rulesContainer"></div>
+      <button class="btn btn-sm" style="width:100%; justify-content:center;" onclick="saveConfig()">Kuralları Kaydet (Hafızaya Al)</button>
+
+      <div style="display:flex; gap:6px; margin-top:8px;">
+        <button class="btn btn-sm btn-secondary" style="flex:1; justify-content:center;" onclick="exportConfig()">📤 Dışa Aktar</button>
+        <button class="btn btn-sm btn-secondary" style="flex:1; justify-content:center;" onclick="document.getElementById('importConfigInput').click()">📥 İçe Aktar</button>
+        <input type="file" id="importConfigInput" accept=".json" style="display:none">
+      </div>
+      <p style="font-size:10.5px; color:var(--text-muted); margin-top:6px;">
+        "Dışa Aktar" o an ekranda görünen kural setini indirir; uygulama klasörüne koyarsanız (e-Fatura seti için <code>mega_config.json</code> adıyla) bir sonraki açılışta varsayılan olarak yüklenir.
+      </p>
+    </div>
+  </div>
+
+  <!-- Sağ Panel: Dosya Yükleme ve Sonuçlar -->
+  <div>
+    <div class="card">
+      <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <div class="drop-zone-full">
+          <p><b>Fatura PDF'lerini Sürükleyip Bırakın</b> veya Dosya Seçin</p>
+          <span style="font-size:11px; color:var(--text-muted);">Aynı anda birden fazla fatura yüklenebilir</span>
+        </div>
+        <span class="drop-zone-compact-label">+ Daha fazla fatura ekle (sürükleyin veya tıklayın)</span>
+        <input type="file" id="fileInput" multiple accept=".pdf" style="display:none">
+      </div>
+
+      <div class="scan-mode-toggle">
+        <label><input type="checkbox" id="toggle-qr" checked> QR kod ile ara</label>
+        <label><input type="checkbox" id="toggle-regex" checked> Regex ile ara</label>
+      </div>
+
+      <div id="status-msg"></div>
+
+      <div id="progressContainer" style="display:none; align-items:center; gap:8px; margin-bottom:10px;">
+        <progress id="progressBar" value="0" max="100" style="flex:1; height:16px;"></progress>
+        <button class="btn btn-sm btn-secondary" onclick="cancelProcessing()">✕ İptal</button>
+      </div>
+
+      <div id="resultsArea" style="display:none;">
+        <div class="card-title" style="justify-content:flex-start; flex-wrap:wrap; gap:14px;">
+          <span>Okunan Faturalar (<span id="fileCount">0</span>)</span>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-sm btn-secondary" onclick="refreshAll()">🔄 Yenile</button>
+            <button class="btn btn-sm btn-secondary" onclick="copyToClipboard()">📋 Panoya Kopyala</button>
+            <button class="btn btn-sm" onclick="exportToCSV()">📥 CSV İndir</button>
+          </div>
+          <div class="filename-width-control">
+            <span>Dosya Adı Genişliği</span>
+            <input type="range" id="filenameWidthSlider" min="100" max="600" step="20" value="260" oninput="setFilenameColWidth(this.value)">
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table id="dataTable">
+            <thead><tr id="tableHeader"></tr></thead>
+            <tbody id="tableBody"></tbody>
+            <tfoot><tr id="tableFooter"></tr></tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ham Veri Önizleme -->
+    <div class="card inspector">
+      <div id="validationBox" style="display:none;"></div>
+      <div class="card-title">
+        <span>Ham Veri Önizleme</span>
+        <select id="pdfSelect" style="padding:4px; font-size:12px;" onchange="renderInspector()"></select>
+      </div>
+      <div class="text-preview" id="rawTextPreview">Bir dosya seçildiğinde QR ham verisi ya da PDF metin katmanı burada görüntülenecektir...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Muhasebeci için: hangi matematiksel kontrolün ne yaptığının açık açıklaması —
+     .grid'in DIŞINDA (2 sütunlu grid'in bir hücresine sıkışıp daralmasın diye),
+     .header ve .grid gibi doğrudan body'nin çocuğu, tam sayfa genişliğinde. -->
+  <div class="card" style="margin-top:20px;">
+    <div class="card-title"><span>📐 Matematiksel Doğrulama Kuralları</span></div>
+    <div style="font-size:13px; line-height:1.7; color:var(--text-color);">
+      <p>Her faturada aşağıdaki kontroller otomatik yapılır. Uygulanamayan kontrol (ilgili tutar bulunamadıysa) sessizce atlanır — "hata" sayılmaz.</p>
+
+      <p><b>Kural 1 — Vergiler Dahil Toplam kontrolü:</b><br>
+      <code>KDV Matrahları Toplamı + Hesaplanan KDV Toplamı = Vergiler Dahil Toplam</code><br>
+      <span style="color:var(--text-muted);">Tevkifatlı faturalarda "Hesaplanan KDV" genelde tevkifat sonrası net tutarı gösterdiği için, buradaki KDV toplamına tevkifat tutarı geri eklenir (bkz. Kural 3) — böylece formül tevkifatlı/tevkifatsız her faturada doğru çıkar.</span></p>
+
+      <p><b>Kural 2 — Ödenecek Tutar kontrolü (tevkifat üzerinden):</b><br>
+      <code>Vergiler Dahil Toplam − Tevkifat Toplamı = Ödenecek Tutar</code><br>
+      <span style="color:var(--text-muted);">Tevkifat yoksa (kesinti yapılmamışsa) bu iki tutar zaten eşit olmalı.</span></p>
+
+      <p><b>Kural 2b — Ödenecek Tutar kontrolü (matrah+KDV üzerinden, bağımsız çapraz kontrol):</b><br>
+      <code>KDV Matrahları Toplamı + Hesaplanan KDV Toplamı = Ödenecek Tutar</code><br>
+      <span style="color:var(--text-muted);">Kural 1 ve 2'nin matematiksel sonucu ama BİLEREK ayrı tutulur: "Vergiler Dahil Toplam" alanının kendisi yanlış okunmuş olsa bile, bu kontrol ona hiç güvenmeden doğrudan matrah ve KDV'den Ödenecek Tutar'a gider.</span></p>
+
+      <p><b>Kural 3 — Tevkifat tespiti ve oran kontrolü (sadece Fatura Tipi = TEVKIFAT olan faturalarda):</b><br>
+      <code>Tevkifat Tutarı = Vergiler Dahil Toplam − Ödenecek Tutar</code><br>
+      <code>Tam KDV = KDV Matrahı × KDV Oranı</code> &nbsp; (vendor'un "Hesaplanan KDV" alanına tevkifat sonrası net mi, tevkifat öncesi tam mı yazdığından bağımsız, her zaman güvenilir)<br>
+      Tevkifat Tutarı'nın Tam KDV'ye oranı hesaplanıp GİB'in standart kesinti fraksiyonlarıyla (1/10, 2/10, 3/10, 4/10, 5/10, 5,5/10, 7/10, 9/10, 10/10) karşılaştırılır.<br>
+      <span style="color:var(--text-muted);">Oran bu fraksiyonlardan birine uymuyorsa "⚠ Standart dışı" diye işaretlenir. Gerçek bir örnekle doğrulandı: bunun en yaygın nedeni, faturada birden fazla kalem olup SADECE BİR KISMININ tevkifata tabi olmasıdır (ör. malzeme tevkifatsız, işçilik %90/9-10 tevkifatlı) — QR sadece fatura TOPLAMINI verdiği için kalem detayı görülemiyor, kesintinin kendisi aslında standart olsa bile toplam üzerinden hesaplanan "sulandırılmış" oran standart dışı çıkar. Gerçek bir veri hatası da olabilir — ayırt etmek için faturanın kendisindeki kalem bazlı KDV tablosuna bakmak gerekir.</span></p>
+
+      <p><b>Bilgi notu — Olası İskonto (hata değildir, sadece tahmindir):</b><br>
+      <code>Mal/Hizmet Tutarı − KDV Matrahları Toplamı = Olası İskonto</code><br>
+      <span style="color:var(--text-muted);">Karekod verisi iskonto tutarını hiçbir zaman ayrıca vermiyor. Bazı faturalarda "Mal/Hizmet Tutarı" iskonto öncesi brüt tutarı taşıdığı için, matrah toplamıyla arasındaki fark iskontoya işaret edebilir — ama bu kesin değildir, sadece bir tahmindir, bu yüzden asla "hata" (kırmızı) olarak işaretlenmez.</span></p>
+
+      <p style="margin-top:14px; padding-top:10px; border-top:1px solid var(--border-color);">
+      <b>ℹ️ Özel vergiler (ÖİV, Konaklama Vergisi, Damga Vergisi vb.) ve KDV/matrah/tevkifat tutarları yukarıdaki hiçbir formüle dahil edilmez</b> — bunlar hangi aşamada (KDV öncesi/sonrası) hesaba katıldığı güvenilir şekilde bilinmediği için sadece kendi sütunlarında bilgi amaçlı gösterilir.
+      Ayrıca bu özel vergiler <b>sadece karekod (QR) okunduğunda</b> tanınabiliyor — regex (metin) yoluyla okunan faturalarda henüz aranmıyor.</p>
+
+      <p style="margin-top:14px; padding-top:10px; border-top:1px solid var(--border-color);">
+      <b>🧾 Serbest Meslek Makbuzu (e-SMM) — ayrı bir belge türü, satırda <span class="badge badge-ok" style="vertical-align:middle;">Serbest Meslek</span> rozetiyle işaretlenir:</b><br>
+      Sadece serbest muhasebeci mali müşavirler değil, avukatlar dahil hizmetini serbest meslek makbuzuyla kesen herkes bu türe girer. Bu belgeler e-Fatura değildir; "Mal/Hizmet", "KDV Matrahı", "Tevkifat" yerine <b>Brüt Ücret, G.V. Stopaj (gelir vergisi kesintisi — KDV'den tamamen ayrı bir vergi), Net Ücret, KDV Tevkifatı, Net Tahsilat</b> kavramları kullanılır. Yukarıdaki Kural 1/2/2b/3 bu satırlara <b>hiç uygulanmaz</b>; yerine kendi kontrolleri çalışır:<br>
+      <code>KDV Tutarı − KDV Tevkifatı = Tahsil Edilen KDV</code> &nbsp;·&nbsp;
+      <code>Brüt Ücret − G.V. Stopaj Tutarı = Net Ücret</code> &nbsp;·&nbsp;
+      <code>Net Ücret + Tahsil Edilen KDV = Net Tahsilat</code><br>
+      <span style="color:var(--text-muted);">Gerçek örneklerle keşfedildi: hem yazılıma hem meslek türüne göre karekod içeriği değişiyor — bazı vendor'lar (ör. detaylı kırılım) yukarıdaki üç kontrolü de yapmaya izin verirken, bazı vendor'lar (minimal, sadece net ücret + net tahsilat — hem muhasebeci hem avukat örneklerinde görüldü) hiçbir kırılım vermiyor; o satırlarda kontrol sessizce atlanır, "hata" sayılmaz. "Mal/Hizmet Tutarı" sütununda Brüt Ücret, "Ödenecek Tutar" sütununda Net Tahsilat gösterilir (en yakın kavramsal karşılıklar). Regex (metin) yolundaki kurallar da BU belge türü için sol paneldeki (düzenlenebilir) e-Fatura kural setinden tamamen ayrı, otomatik ve sabit kodlu bir katmandır — "Belge Numarası", "Brüt Ücret Tutarı" gibi kendine özgü etiketleri tanır.</span></p>
+    </div>
+  </div>
+
+<!-- QR Elle İşaretleme Penceresi -->
+<div id="qrPickerModal">
+  <div class="qr-picker-dialog">
+    <div class="qr-picker-header">
+      <b>📍 Karekodun olduğu bölgeyi fare ile sürükleyerek işaretleyin</b>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button class="btn btn-sm btn-secondary" id="qrPickerPrevPage" onclick="changeQrPickerPage(-1)">‹ Önceki Sayfa</button>
+        <span id="qrPickerPageIndicator" style="font-size:12px; color:var(--text-muted);"></span>
+        <button class="btn btn-sm btn-secondary" id="qrPickerNextPage" onclick="changeQrPickerPage(1)">Sonraki Sayfa ›</button>
+        <button class="btn btn-sm btn-secondary" onclick="closeQrPicker()">✕ Kapat</button>
+      </div>
+    </div>
+    <div id="qrPickerCanvasWrap">
+      <canvas id="qrPickerCanvas"></canvas>
+      <div id="qrPickerSelectionBox"></div>
+    </div>
+    <div class="qr-picker-footer">
+      <span id="qrPickerStatus"></span>
+      <button class="btn btn-sm" id="qrPickerScanBtn" onclick="scanQrPickerSelection()" disabled>🔍 Bu Bölgeyi Tara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bir satırı istenen yöntemle tekrar tarama menüsü -->
+<div id="rescanMenu"></div>
+
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+  // Sadece QR'da veri bulunamadığında kullanılan yedek regex kuralları.
+  // id'ler sabit tablo şemasıyla eşleşir, değiştirilmemeli.
+  // NOT: KDV tutarları burada YOK — farklı oranlar (%1, %10, %18, %20 vb.)
+  // extractDynamicAmountFields() ile otomatik, kendi başlıklı sütunlar halinde
+  // yakalanıyor (aşağıda). Aynı şekilde QR'daki bilinmeyen/ek alanlar da
+  // buildQrResult()'ta otomatik dinamik sütuna dönüşüyor.
+  const defaultRules = [
+    { id: 'faturaNo', label: 'Fatura No', regex: '(?:Fatura\\s*No|E-Arşiv\\s*Fatura\\s*No)\\s*[:\\s]*([A-Z0-9]{13,16})' },
+    { id: 'tarih', label: 'Tarih', regex: '(?:Düzenleme\\s*Tarihi|Fatura\\s*Tarihi)\\s*[:\\s]*(\\d{2}\\s*[\\/\\.-]\\s*\\d{2}\\s*[\\/\\.-]\\s*\\d{4})' },
+    { id: 'vkn', label: 'VKN/TCKN (Satıcı)', regex: '(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*(\\d{10,11})' },
+    { id: 'avkn', label: 'VKN/TCKN (Alıcı)', regex: '(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*\\d{10,11}[\\s\\S]*?(?:VKN|TCKN|Vergi\\s*Kimlik\\s*No)\\s*[:\\s]*(\\d{10,11})' },
+    { id: 'senaryo', label: 'Senaryo', regex: 'Senaryo\\s*[:\\s]*([A-ZÇĞİÖŞÜ]+)' },
+    { id: 'faturaTipi', label: 'Fatura Tipi', regex: 'Fatura\\s*Tipi\\s*[:\\s]*([A-ZÇĞİÖŞÜ]+)' },
+    { id: 'paraBirimi', label: 'Para Birimi', regex: 'Ödenecek\\s*Tutar\\s*[:\\s]*[\\d\\.,]+\\s*(TL|TRY|EUR|USD|GBP)' },
+    { id: 'malHizmet', label: 'Mal/Hizmet Toplamı', regex: 'Mal\\s*(?:ve|\\/)?\\s*Hizmet\\s*Toplam\\s*(?:Tutarı)?\\s*[:\\s]*([\\d\\.,]+)' },
+    { id: 'vergiDahil', label: 'Vergiler Dahil Toplam', regex: 'Vergiler\\s*Dahil\\s*Toplam\\s*(?:Tutar[ıi]?)?\\s*[:\\s]*([\\d\\.,]+)' },
+    { id: 'odenecek', label: 'Ödenecek Tutar', regex: 'Ödenecek\\s*Tutar\\s*[:\\s]*([\\d\\.,]+)' },
+    { id: 'ettn', label: 'ETTN', regex: 'ETTN\\s*[:\\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})' }
+  ];
+
+  // Serbest Meslek Makbuzu (e-SMM) için AYRI, kullanıcının düzenleyebildiği
+  // regex kuralları — e-Fatura'daki defaultRules ile aynı {id,label,regex}
+  // yapısı, ama tamamen farklı etiketler arar ("Belge Numarası", "Brüt
+  // Ücret Tutarı" vb., bkz. extractEsmmFields). "faturaNo" dışındaki id'ler
+  // sabit FIELD_COLUMNS'a değil, ESMM_EXTRA_LABELS üzerinden dinamik
+  // sütunlara yazılır (Tevkifat/İskonto'da yapılanla aynı desen).
+  const defaultEsmmRules = [
+    { id: 'faturaNo', label: 'Belge Numarası (Fatura No karşılığı)', regex: 'Belge\\s*Numaras[ıi]\\s*[:\\s]*([A-Z0-9]{8,20})' },
+    { id: 'brutUcret', label: 'Brüt Ücret Tutarı', regex: 'Br[üu]t\\s*[ÜUü]cret\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'kdvTutariSmm', label: 'KDV Tutarı', regex: 'KDV\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'gvStopaj', label: 'G.V. Stopaj Tutarı', regex: 'G\\.?V\\.?\\s*Stopaj\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'netUcret', label: 'Net Ücret Tutarı', regex: 'Net\\s*[ÜUü]cret\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'kdvTevkifatSmm', label: 'KDV Tevkifatı Tutarı', regex: 'KDV\\s*Tevkifat[ıi]\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'tahsilEdilenKdv', label: 'Tahsil Edilen KDV Tutarı', regex: 'Tahsil\\s*Edilen\\s*KDV\\s*Tutar[ıi]\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' },
+    { id: 'netTahsilat', label: 'Net Tutar (Net Tahsilat karşılığı)', regex: 'Net\\s*Tutar\\s*[:\\s]*([\\d\\.,]+)\\s*(?:TL|TRY|EUR|USD|GBP)' }
+  ];
+
+  // "faturaNo" hariç her esmmRules id'sinin dinamik sütun başlığı. QR
+  // yolundaki (buildEsmmQrResult) aynı isimlerle birebir eşleşir ki iki
+  // kaynaktan gelen aynı kavram tabloda aynı sütunda birleşsin.
+  const ESMM_EXTRA_LABELS = {
+    brutUcret: 'Brüt Ücret',
+    kdvTutariSmm: 'KDV Tutarı (Serbest Meslek)',
+    gvStopaj: 'G.V. Stopaj Tutarı',
+    netUcret: 'Net Ücret',
+    kdvTevkifatSmm: 'KDV Tevkifatı (Serbest Meslek)',
+    tahsilEdilenKdv: 'Tahsil Edilen KDV',
+    netTahsilat: 'Net Tahsilat'
+  };
+
+  // Tablo şeması: canonical alan id -> başlık
+  const FIELD_COLUMNS = [
+    ['faturaNo', 'Fatura No'],
+    ['tarih', 'Tarih'],
+    ['vkn', 'VKN/TCKN (Satıcı)'],
+    ['avkn', 'VKN/TCKN (Alıcı)'],
+    ['senaryo', 'Senaryo'],
+    ['faturaTipi', 'Fatura Tipi'],
+    ['paraBirimi', 'Para Birimi'],
+    ['malHizmet', 'Mal/Hizmet Tutarı'],
+    ['vergiDahil', 'Vergiler Dahil Toplam'],
+    ['odenecek', 'Ödenecek Tutar'],
+    ['ettn', 'ETTN']
+  ];
+
+  let rules = [];
+  let esmmRules = [];
+  let currentRulesType = 'fatura'; // 'fatura' | 'esmm' - sol paneldeki hangi kural seti gösteriliyor
+  let rows = [];
+  let lastFiles = []; // en son yüklenen dosyalar - kural değişince yeniden taramak için
+  let dynamicColumns = []; // sabit 12 alanın dışında kalan, satırlara göre değişen başlıklar (KDV oranları vb.)
+
+  function fmtNum(n) {
+    return n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function parseTurkishNumber(s) {
+    if (!s) return null;
+    const n = parseFloat(String(s).trim().replace(/\./g, '').replace(',', '.'));
+    return isNaN(n) ? null : n;
+  }
+
+  // ==========================================================================
+  // DOĞRULAMA MODÜLÜ
+  // ==========================================================================
+  // Yeni bir kontrol eklemek istersen: aşağıya "VALIDATORS = [...]" dizisine
+  // yeni bir fonksiyon ekle. Her kontrol fonksiyonu tek bir imzayı izler:
+  //
+  //     function checkXyz(ctx) { return [ {ok, text}, ... ]; }
+  //
+  // ctx, buildValidationContext() tarafından satır başına BİR KEZ hazırlanan
+  // ortak bir veri paketidir (malHizmet/vergiDahil/odenecek + oran bazında
+  // matrah/KDV/tevkifat haritası) — her kontrol kendi hesaplamasını baştan
+  // yapmak yerine bunu kullanır. Sıra: buildValidationContext -> her
+  // VALIDATORS elemanı çalıştırılır -> sonuçlar birleştirilir.
+  // ==========================================================================
+
+  const VALIDATION_EPS = 0.05; // kuruş yuvarlama payı - bundan büyük farklar gerçek hata sayılır
+
+  // KDV Tevkifatı Uygulaması'nda (KDV Genel Uygulama Tebliği) kullanılan
+  // standart tevkifat kesinti oranları — kesilen tevkifat / tam hesaplanan
+  // KDV oranı bunlardan biriyle örtüşmeli. Örtüşmüyorsa muhtemelen tevkifat
+  // değil, iskonto ya da başka bir veri sorunu var demektir.
+  const STANDARD_TEVKIFAT_FRACTIONS = [
+    { num: 1, den: 10 }, { num: 2, den: 10 }, { num: 3, den: 10 }, { num: 4, den: 10 },
+    { num: 5, den: 10 }, { num: 5.5, den: 10 }, { num: 7, den: 10 }, { num: 9, den: 10 },
+    { num: 10, den: 10 } // 10/10: tam tevkifat
+  ];
+  const TEVKIFAT_ORAN_TOLERANS = 0.015; // ±1,5 puan - yuvarlama payı
+
+  // Bir satırın extraFields'ını "%oran -> {matrah, kdv, tevkifat}" haritasına
+  // dönüştürür. Türetilmiş alan hesaplamaları (computeDerivedTevkifatFields)
+  // ve doğrulama kontrolleri (VALIDATORS) aynı bu haritayı kullanıyor.
+  function buildRateMap(extraFields) {
+    const rates = {}; // "20" -> { matrah, kdv, tevkifat }
+    Object.entries(extraFields || {}).forEach(([label, val]) => {
+      const n = parseTurkishNumber(val);
+      if (n === null) return;
+      const m = label.match(/^(.*?)\s*\(%([\d.]+)\)\s*$/);
+      if (!m) return;
+      const type = m[1].trim();
+      const rate = m[2];
+      if (!rates[rate]) rates[rate] = { matrah: null, kdv: null, tevkifat: null };
+      // Sıra önemli: "Hesaplanan KDV Tevkifat (%20)" hem /tevkifat/ hem
+      // /kdv/ ile eşleşir, önce tevkifat kontrol edilmeli.
+      if (/tevkifat/i.test(type)) rates[rate].tevkifat = (rates[rate].tevkifat || 0) + n;
+      else if (/matrah/i.test(type)) rates[rate].matrah = (rates[rate].matrah || 0) + n;
+      else if (/kdv/i.test(type)) rates[rate].kdv = (rates[rate].kdv || 0) + n;
+    });
+    return rates;
+  }
+
+  // Satır başına bir kez hazırlanan, tüm kontrol fonksiyonlarının ortaklaşa
+  // kullandığı bağlam. Ham veriyi (fields/extraFields) burada bir kere
+  // yorumluyoruz, her kontrol kendi başına tekrar parse etmiyor.
+  function buildValidationContext(row) {
+    const rates = buildRateMap(row.extraFields);
+    let kdvToplam = 0, kdvVar = false;
+    let matrahToplam = 0, matrahVar = false;
+    let tevkifatToplam = 0, tevkifatVar = false;
+    Object.values(rates).forEach(r => {
+      if (r.kdv !== null) { kdvToplam += r.kdv; kdvVar = true; }
+      if (r.matrah !== null) { matrahToplam += r.matrah; matrahVar = true; }
+      if (r.tevkifat !== null) { tevkifatToplam += r.tevkifat; tevkifatVar = true; }
+    });
+
+    return {
+      row,
+      docType: row.docType || 'EFATURA',
+      malHizmet: parseTurkishNumber(row.fields.malHizmet),
+      vergiDahil: parseTurkishNumber(row.fields.vergiDahil),
+      odenecek: parseTurkishNumber(row.fields.odenecek),
+      isTevkifatFatura: /tevkifat/i.test(row.fields.faturaTipi || ''),
+      rates, kdvToplam, kdvVar, matrahToplam, matrahVar, tevkifatToplam, tevkifatVar
+    };
+  }
+
+  // Kural 1: (KDV Matrahları toplamı, yoksa Mal/Hizmet Tutarı) + Σ(TAM
+  // KDV) = Vergiler Dahil Toplam. Taban olarak matrahı tercih ediyoruz:
+  // iskontolu faturalarda QR payload'ı iskonto tutarını hiç taşımıyor,
+  // Mal/Hizmet Tutarı da bazı vendor'larda iskonto ÖNCESİ brüt olabiliyor —
+  // matrah ise tanım gereği her zaman vergiye esas (iskonto sonrası) taban
+  // olduğu için bu ilişki her koşulda doğru çıkıyor (gerçek örneklerle doğrulandı).
+  // TEVKIFAT faturalarında "Hesaplanan KDV" alanı genelde zaten tevkifat
+  // SONRASI net değeri taşıyor (bkz. computeDerivedTevkifatFields), ama
+  // Vergiler Dahil Toplam TAM KDV üzerinden hesaplanıyor — o yüzden burada
+  // tevkifatToplam'ı geri ekleyip "tam KDV"yi yeniden kuruyoruz (gerçek bir örnekle doğrulandı: tevkifatsız faturalarda
+  // tevkifatToplam=0 olduğu için hiçbir şey değişmiyor).
+  // DÜZELTME (gerçek çoklu-dosya karşılaştırmasıyla bulundu): burada da
+  // checkMatrahKdvOdenecek'teki AYNI belirsizlik var — "Hesaplanan KDV"
+  // bazı yazılımlarda zaten NET, bazılarında
+  // zaten TAM. Eskiden her zaman tevkifatı geri ekliyorduk (sadece "net"
+  // senaryosu doğru varsayımıyla) — "tam" senaryosunda bu ÇİFTE SAYMAYA yol
+  // açıp yanlış pozitif üretiyordu. Artık iki olasılığı da deniyoruz.
+  function checkVergiDahilToplam(ctx) {
+    const tabanTutar = ctx.matrahVar ? ctx.matrahToplam : ctx.malHizmet;
+    const tabanLabel = ctx.matrahVar ? 'KDV Matrahları toplamı' : 'Mal/Hizmet Tutarı';
+    if (tabanTutar === null || ctx.vergiDahil === null || !ctx.kdvVar) return [];
+
+    const beklenenTam = tabanTutar + ctx.kdvToplam; // "Hesaplanan KDV" zaten tam ise  
+    const beklenenNet = beklenenTam + ctx.tevkifatToplam; // "Hesaplanan KDV" net ise, tevkifat geri eklenir  
+    const okTam = Math.abs(beklenenTam - ctx.vergiDahil) <= VALIDATION_EPS;
+    const okNet = ctx.tevkifatVar && Math.abs(beklenenNet - ctx.vergiDahil) <= VALIDATION_EPS;
+    const ok = okTam || okNet;
+    const beklenen = (!okTam && okNet) ? beklenenNet : beklenenTam;
+    const kdvLabel = (!okTam && okNet)
+      ? `Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)}) + Tevkifat (${fmtNum(ctx.tevkifatToplam)}) = Tam KDV (${fmtNum(beklenen - tabanTutar)})`
+      : `Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)})`;
+    return [{
+      ok,
+      text: `${tabanLabel} (${fmtNum(tabanTutar)}) + ${kdvLabel} = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Vergiler Dahil Toplam (${fmtNum(ctx.vergiDahil)})` +
+        (ok ? '' : ` — fark: ${fmtNum(ctx.vergiDahil - beklenen)}`)
+    }];
+  }
+
+  // Kural 2: Vergiler Dahil Toplam − Σ(Tevkifat) = Ödenecek Tutar. Tevkifat
+  // ya doğrudan QR/regex'ten geliyor ya da computeDerivedTevkifatFields()
+  // tarafından türetiliyor (bkz. aşağısı) — ikisi de aynı extraFields
+  // üzerinden buildRateMap ile okunuyor, bu kontrol kaynağı ayırt etmiyor.
+  function checkOdenecekTutar(ctx) {
+    if (ctx.vergiDahil === null || ctx.odenecek === null) return [];
+    if (ctx.isTevkifatFatura && !ctx.tevkifatVar) return []; // tevkifat tutarı hiç türetilemediyse kural yanlış pozitif üretir, atla
+
+    const beklenenOdenecek = ctx.vergiDahil - ctx.tevkifatToplam;
+    const ok = Math.abs(beklenenOdenecek - ctx.odenecek) <= VALIDATION_EPS;
+    const not = ctx.tevkifatVar ? ` − Tevkifat (${fmtNum(ctx.tevkifatToplam)})` : '';
+    return [{
+      ok,
+      text: `Vergiler Dahil Toplam (${fmtNum(ctx.vergiDahil)})${not} = ${fmtNum(beklenenOdenecek)} ${ok ? '=' : '≠'} Ödenecek Tutar (${fmtNum(ctx.odenecek)})` +
+        (ok ? '' : ` — fark: ${fmtNum(ctx.odenecek - beklenenOdenecek)}`)
+    }];
+  }
+
+  // Kural 2b (YENİ): Σ(KDV Matrahları) + Σ(Hesaplanan KDV) [− Tevkifat] =
+  // Ödenecek Tutar. "Vergiler Dahil Toplam" alanının kendisi yanlış okunmuş/
+  // basılmış olsa bile, bu kontrol ona hiç güvenmeden doğrudan matrah+KDV'den
+  // Ödenecek Tutar'a gidiyor — aradaki alanın doğruluğuna bağımlı olmayan,
+  // uçtan uca bağımsız bir doğrulama.
+  // DÜZELTME (gerçek çoklu-dosya karşılaştırmasıyla bulundu): "Hesaplanan
+  // KDV" alanının net mi tam mı yazıldığı vendor'a göre değişiyor (bkz.
+  // computeDerivedTevkifatFields'ın yorumu) — bu yüzden formülün TEK bir
+  // hali (tevkifatlı ya da tevkifatsız) evrensel olarak doğru değil. İKİSİNİ
+  // de deniyoruz, hangisi tutuyorsa onu geçerli sayıyoruz.
+  function checkMatrahKdvOdenecek(ctx) {
+    if (!ctx.matrahVar || !ctx.kdvVar || ctx.odenecek === null) return [];
+
+    const beklenenNet = ctx.matrahToplam + ctx.kdvToplam; // "Hesaplanan KDV" zaten net ise  
+    const beklenenTam = beklenenNet - ctx.tevkifatToplam; // "Hesaplanan KDV" tam ise  
+    const okNet = Math.abs(beklenenNet - ctx.odenecek) <= VALIDATION_EPS;
+    const okTam = ctx.tevkifatVar && Math.abs(beklenenTam - ctx.odenecek) <= VALIDATION_EPS;
+    const ok = okNet || okTam;
+    const beklenen = okTam && !okNet ? beklenenTam : beklenenNet;
+    const not = (okTam && !okNet) ? ` − Tevkifat (${fmtNum(ctx.tevkifatToplam)})` : '';
+    return [{
+      ok,
+      text: `KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) + Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)})${not} = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Ödenecek Tutar (${fmtNum(ctx.odenecek)})` +
+        (ok ? '' : ` — fark: ${fmtNum(ctx.odenecek - beklenen)}`)
+    }];
+  }
+
+  // Kural 3 (YENİ): TEVKIFAT faturalarında, computeDerivedTevkifatFields()
+  // tarafından türetilen her tevkifat için, kesinti oranının standart
+  // GİB fraksiyonlarından (1/10, 2/10, ..., 9/10) birine uyup uymadığını
+  // kontrol eder. Uymuyorsa muhtemelen tevkifat değil, iskonto ya da başka
+  // bir veri sorunu var demektir — kullanıcı incelesin diye kırmızı işaretler.
+  function checkTevkifatOranlari(ctx) {
+    const checks = [];
+    if (!ctx.isTevkifatFatura) return checks;
+
+    Object.entries(ctx.rates).forEach(([rate, r]) => {
+      if (r.matrah === null || r.kdv === null || r.tevkifat === null) return;
+      const rateNum = parseFloat(rate);
+      const tamKdv = r.matrah * (rateNum / 100);
+      if (tamKdv <= VALIDATION_EPS) return;
+
+      const oran = r.tevkifat / tamKdv;
+      let closest = null, closestDiff = Infinity;
+      STANDARD_TEVKIFAT_FRACTIONS.forEach(f => {
+        const d = Math.abs(f.num / f.den - oran);
+        if (d < closestDiff) { closestDiff = d; closest = f; }
+      });
+      const ok = closestDiff <= TEVKIFAT_ORAN_TOLERANS;
+      const oranYuzde = (oran * 100).toLocaleString('tr-TR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      checks.push({
+        ok,
+        text: ok
+          ? `Tevkifat oranı (%${rate} KDV üzerinden, ${fmtNum(r.tevkifat)}) standart fraksiyona uyuyor: ${closest.num}/${closest.den} (%${oranYuzde})`
+          : `Tevkifat oranı (%${rate} KDV üzerinden, ${fmtNum(r.tevkifat)}) STANDART DEĞİL: %${oranYuzde} — en yakın standart ${closest.num}/${closest.den} (%${fmtNum(closest.num / closest.den * 100)}) ile bile uyuşmuyor. Gerçek bir örnekle doğrulandı: bunun BİR nedeni faturada birden fazla kalem olup SADECE BİR KISMININ tevkifata tabi olmasıdır (ör. malzeme tevkifatsız, işçilik %90 tevkifatlı) — QR sadece fatura toplamını verdiği için kalem detayı görülemiyor, sulandırılmış oran standart dışı çıkar ama kesintinin kendisi aslında standart olabilir. Veri hatası da olabilir — faturanın kendisine (kalem bazlı KDV tablosuna) bakıp doğrulayın`
+      });
+    });
+
+    return checks;
+  }
+
+  // Bilgilendirici kontrol (YENİ): QR payload'ı iskonto tutarını HİÇ vermiyor
+  // (ne toplam ne satır bazında) — bu yüzden "hata" olarak değil, sadece
+  // türetilmiş bir TAHMİN olarak gösteriyoruz: Mal/Hizmet Tutarı ile KDV
+  // Matrahları toplamı arasındaki fark, iskonto uygulanmışsa bu farka eşit
+  // çıkar (gerçek örneklerle doğrulandı). Her
+  // zaman ok:true — bir hata değil, sadece bilgi notu.
+  function checkOlasiIskonto(ctx) {
+    if (!ctx.matrahVar || ctx.malHizmet === null) return [];
+    const fark = ctx.malHizmet - ctx.matrahToplam;
+    if (fark <= VALIDATION_EPS) return [];
+    return [{
+      ok: true,
+      text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — muhtemelen iskonto (QR bunu ayrıca vermiyor, bu türetilmiş bir tahmindir, kesin değildir)`
+    }];
+  }
+
+  // e-SMM için AYRI kontrol seti (YENİ): e-Fatura'nın matrah/KDV/tevkifat
+  // kavramları e-SMM'de bambaşka anlamlara geliyor (bkz. isEsmmPayload
+  // yorumu) — o yüzden e-Fatura VALIDATORS'ını e-SMM satırlarına hiç
+  // çalıştırmıyoruz (yanlış pozitif üretirdi), kendi formüllerini kuruyoruz.
+  // Sadece Varyant 2 (detaylı QR şeması) kırılım verdiği için
+  // kontrol edilebiliyor — Varyant 1 (minimal QR şeması) ve
+  // regex yoluyla eksik okunan satırlarda ilgili alanlar yoksa kontrol
+  // sessizce atlanır (diğer kurallarla aynı davranış).
+  function checkEsmmTutarlar(ctx) {
+    const ef = ctx.row.extraFields || {};
+    const brut = parseTurkishNumber(ef['Brüt Ücret']);
+    const kdv = parseTurkishNumber(ef['KDV Tutarı (Serbest Meslek)']);
+    const kdvTevkifat = parseTurkishNumber(ef['KDV Tevkifatı (Serbest Meslek)']);
+    const tahsilKdv = parseTurkishNumber(ef['Tahsil Edilen KDV']);
+    const stopaj = parseTurkishNumber(ef['G.V. Stopaj Tutarı']);
+    const netUcret = parseTurkishNumber(ef['Net Ücret']);
+    const netTahsilat = parseTurkishNumber(ef['Net Tahsilat']);
+    const checks = [];
+
+    if (kdv !== null && kdvTevkifat !== null && tahsilKdv !== null) {
+      const beklenen = kdv - kdvTevkifat;
+      const ok = Math.abs(beklenen - tahsilKdv) <= VALIDATION_EPS;
+      checks.push({ ok, text: `KDV Tutarı (${fmtNum(kdv)}) − KDV Tevkifatı (${fmtNum(kdvTevkifat)}) = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Tahsil Edilen KDV (${fmtNum(tahsilKdv)})` + (ok ? '' : ` — fark: ${fmtNum(tahsilKdv - beklenen)}`) });
+    }
+    if (brut !== null && stopaj !== null && netUcret !== null) {
+      const beklenen = brut - stopaj;
+      const ok = Math.abs(beklenen - netUcret) <= VALIDATION_EPS;
+      checks.push({ ok, text: `Brüt Ücret (${fmtNum(brut)}) − G.V. Stopaj Tutarı (${fmtNum(stopaj)}) = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Net Ücret (${fmtNum(netUcret)})` + (ok ? '' : ` — fark: ${fmtNum(netUcret - beklenen)}`) });
+    }
+    if (netUcret !== null && tahsilKdv !== null && netTahsilat !== null) {
+      const beklenen = netUcret + tahsilKdv;
+      const ok = Math.abs(beklenen - netTahsilat) <= VALIDATION_EPS;
+      checks.push({ ok, text: `Net Ücret (${fmtNum(netUcret)}) + Tahsil Edilen KDV (${fmtNum(tahsilKdv)}) = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Net Tahsilat (${fmtNum(netTahsilat)})` + (ok ? '' : ` — fark: ${fmtNum(netTahsilat - beklenen)}`) });
+    }
+
+    return checks;
+  }
+
+  const EFATURA_VALIDATORS = [
+    checkVergiDahilToplam,
+    checkOdenecekTutar,
+    checkMatrahKdvOdenecek,
+    checkTevkifatOranlari,
+    checkOlasiIskonto
+  ];
+  const ESMM_VALIDATORS = [checkEsmmTutarlar];
+
+  // Uygulanabilir HER kontrolü (geçti/kaldı fark etmeden) {ok, text} olarak
+  // döner — kullanıcı hangi kontrollerin yapıldığını tek tek görebilsin diye.
+  function validateRow(row) {
+    const ctx = buildValidationContext(row);
+    const validators = ctx.docType === 'ESMM' ? ESMM_VALIDATORS : EFATURA_VALIDATORS;
+    return validators.flatMap(fn => fn(ctx));
+  }
+
+  // ==========================================================================
+  // TÜRETİLMİŞ ALANLAR: TEVKIFAT
+  // ==========================================================================
+  // Fatura Tipi TEVKIFAT olduğunda, her KDV oranı için KDV Matrahı × oran
+  // "tam" hesaplanması gereken KDV'yi verir. Bu, gerçekte "Hesaplanan KDV"
+  // olarak yazılan tutardan YÜKSEKSE, aradaki fark kesilen tevkifattır —
+  // QR payload'ı bunu çoğu zaman ayrıca vermiyor (sadece basılı metinde
+  // geçiyor), o yüzden burada kendimiz türetip normal bir dinamik sütuna
+  // ("Tevkifat (%oran)") yazıyoruz. Vendor zaten doğrudan tevkifat veriyorsa
+  // (ör. "Hesaplanan KDV Tevkifat (%20)") ona dokunmuyoruz, üstüne yazmıyoruz.
+  // DÜZELTME (gerçek çoklu-dosya karşılaştırmasıyla bulundu): "Hesaplanan
+  // KDV" alanının tevkifat SONRASI net mi yoksa tevkifat ÖNCESİ tam mı
+  // yazıldığı yazılıma göre değişiyor — kimi yazılımda net, ama çoğunda zaten TAM (matrah ×
+  // oranla birebir eşleşiyor). Eski kod SADECE "net" senaryosunu tanıyordu
+  // ("tamKdv − basılıKDV" farkı), bu yüzden "tam" senaryosunda fark sıfır
+  // çıkıp tevkifat hiç türetilmiyordu. Artık tevkifatı, vendor'ın bu
+  // tercihinden BAĞIMSIZ, çok daha güvenilir bir kaynaktan alıyoruz:
+  // Vergiler Dahil Toplam − Ödenecek Tutar (bu fark her koşulda gerçek
+  // tevkifat tutarına eşittir). Bu yol başarısız olursa (vergiDahil/odenecek
+  // yoksa) eski "tam KDV − basılı KDV" yöntemine geri düşüyoruz.
+  function computeDerivedTevkifatFields(row) {
+    const isTevkifatFatura = /tevkifat/i.test(row.fields.faturaTipi || '');
+    if (!isTevkifatFatura) return;
+
+    const rates = buildRateMap(row.extraFields);
+    const rateEntries = Object.entries(rates).filter(([, r]) => r.matrah !== null);
+    if (!rateEntries.length) return;
+    if (rateEntries.some(([, r]) => r.tevkifat !== null)) return; // vendor zaten en az bir oran için vermiş, hiç dokunma
+
+    // "Tam KDV" (matrah × oran) her zaman güvenilir — vendor'ın "Hesaplanan
+    // KDV" alanına net mi tam mı yazdığından tamamen bağımsız hesaplanıyor.
+    const tamKdvByRate = {};
+    let tamKdvToplam = 0;
+    rateEntries.forEach(([rate, r]) => {
+      const tamKdv = r.matrah * (parseFloat(rate) / 100);
+      tamKdvByRate[rate] = tamKdv;
+      tamKdvToplam += tamKdv;
+    });
+    if (tamKdvToplam <= VALIDATION_EPS) return;
+
+    const vergiDahil = parseTurkishNumber(row.fields.vergiDahil);
+    const odenecek = parseTurkishNumber(row.fields.odenecek);
+    let toplamTevkifat = 0;
+    if (vergiDahil !== null && odenecek !== null && (vergiDahil - odenecek) > VALIDATION_EPS) {
+      toplamTevkifat = vergiDahil - odenecek; // güvenilir yol
+    } else {
+      // Yedek yol ("Hesaplanan KDV" zaten net yazılmış)
+      let kdvToplam = 0;
+      rateEntries.forEach(([, r]) => { if (r.kdv !== null) kdvToplam += r.kdv; });
+      const fark = tamKdvToplam - kdvToplam;
+      if (fark > VALIDATION_EPS) toplamTevkifat = fark;
+    }
+    if (toplamTevkifat <= VALIDATION_EPS) return;
+
+    // Toplam tevkifatı oranlara, her oranın "tam KDV"sindeki ağırlığına göre
+    // dağıt — tek oranlı faturalarda (gerçek örneklerin hemen hepsi) zaten
+    // bire bir, çok oranlı faturalarda orantılı paylaştırma en makul yaklaşım.
+    rateEntries.forEach(([rate]) => {
+      const pay = tamKdvByRate[rate] / tamKdvToplam;
+      const tevkifatPay = toplamTevkifat * pay;
+      if (tevkifatPay <= VALIDATION_EPS) return;
+
+      row.extraFields[`Tevkifat (%${rate})`] = fmtNum(tevkifatPay);
+
+      const oran = tevkifatPay / tamKdvByRate[rate];
+      let closest = null, closestDiff = Infinity;
+      STANDARD_TEVKIFAT_FRACTIONS.forEach(f => {
+        const d = Math.abs(f.num / f.den - oran);
+        if (d < closestDiff) { closestDiff = d; closest = f; }
+      });
+      const oranYuzde = (oran * 100).toLocaleString('tr-TR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      // Değer harfle başlıyor (rakamla değil) — footer toplama satırı
+      // parseTurkishNumber ile her hücreyi sayıya çevirmeye çalışıyor,
+      // rakamla başlayan bir "5/10" gibi metni yanlışlıkla toplardı.
+      row.extraFields[`Tevkifat Oranı (%${rate})`] = closestDiff <= TEVKIFAT_ORAN_TOLERANS
+        ? `Standart ${closest.num}/${closest.den} (%${oranYuzde})`
+        : `⚠ Standart dışı (%${oranYuzde})`;
+    });
+  }
+
+  // ==========================================================================
+  // TÜRETİLMİŞ ALANLAR: OLASI İSKONTO
+  // ==========================================================================
+  // QR payload'ı iskonto tutarını hiçbir vendor'da ayrıca vermiyor — bu
+  // yüzden "kesin" değil, "olası" bir tahmin: Mal/Hizmet Tutarı (bazı
+  // vendor'larda iskonto ÖNCESİ brüt) ile KDV Matrahları toplamı (her zaman
+  // iskonto SONRASI) arasındaki fark. checkOlasiIskonto ile aynı formülü
+  // kullanıyor ama SONUCU bir sütuna da yazıyor (Tevkifat'ta yaptığımız gibi)
+  // ki tabloda direkt görünsün, sadece kontrol kutusuna gömülü kalmasın.
+  function computeDerivedDiscountField(row) {
+    const malHizmet = parseTurkishNumber(row.fields.malHizmet);
+    if (malHizmet === null) return;
+
+    const rates = buildRateMap(row.extraFields);
+    let matrahToplam = 0, matrahVar = false;
+    Object.values(rates).forEach(r => {
+      if (r.matrah !== null) { matrahToplam += r.matrah; matrahVar = true; }
+    });
+    if (!matrahVar) return;
+
+    const fark = malHizmet - matrahToplam;
+    if (fark <= VALIDATION_EPS) return; // fark yok/negatif - iskonto tespit edilemedi
+
+    row.extraFields['Olası İskonto'] = fmtNum(fark);
+  }
+
+  // Her satır için türetilmiş alanları hesaplar, doğrulama kontrollerini
+  // çalıştırır, mükerrer fatura kontrolünü ekler ve dinamik sütunları
+  // günceller. Tüm satırlar bittikten sonra çağrılmalı (hem sütun listesi hem
+  // mükerrer tespiti hepsine bakarak kurulur).
+  function finalizeRows() {
+    rows.forEach(row => computeDerivedTevkifatFields(row));
+    rows.forEach(row => computeDerivedDiscountField(row));
+    rows.forEach(row => { row.validationChecks = validateRow(row); });
+    applyDuplicateChecks();
+    computeDynamicColumns();
+  }
+
+  // Aynı ETTN veya aynı Fatura No birden fazla satırda geçiyorsa (aynı fatura
+  // yanlışlıkla iki kez yüklenmiş olabilir) her ikisini de kırmızı işaretler —
+  // mevcut kontrol listesi/rozet/detay kutusu mekanizmasına eklenerek, ayrı bir
+  // UI gerekmeden entegre olur.
+  function applyDuplicateChecks() {
+    const ettnGroups = new Map();
+    const noGroups = new Map();
+
+    rows.forEach((r, i) => {
+      const ettn = (r.fields.ettn || '').trim().toLowerCase();
+      const no = (r.fields.faturaNo || '').trim().toLowerCase();
+      if (ettn) { if (!ettnGroups.has(ettn)) ettnGroups.set(ettn, []); ettnGroups.get(ettn).push(i); }
+      if (no) { if (!noGroups.has(no)) noGroups.set(no, []); noGroups.get(no).push(i); }
+    });
+
+    function flag(groups, label) {
+      groups.forEach(idxs => {
+        if (idxs.length < 2) return;
+        idxs.forEach(i => {
+          const others = idxs.filter(j => j !== i).map(j => rows[j].fileName);
+          rows[i].validationChecks.push({
+            ok: false,
+            text: `Mükerrer olabilir: aynı ${label} şu dosya(lar)da da var — ${others.join(', ')}`
+          });
+        });
+      });
+    }
+
+    flag(ettnGroups, 'ETTN');
+    flag(noGroups, 'Fatura No');
+  }
+
+  // Ham Veri Önizleme açılır listesini rows dizisinin GÜNCEL sırasına göre
+  // yeniden kurar (sıralama sonrası indexler değiştiği için gerekli).
+  function rebuildPdfSelect() {
+    const selectEl = document.getElementById('pdfSelect');
+    selectEl.innerHTML = '';
+    rows.forEach((row, i) => {
+      const option = document.createElement('option');
+      option.value = i;
+      option.textContent = row.fileName;
+      selectEl.appendChild(option);
+    });
+  }
+
+  function computeDynamicColumns() {
+    const seen = new Set();
+    rows.forEach(row => {
+      Object.keys(row.extraFields || {}).forEach(label => seen.add(label));
+    });
+
+    dynamicColumns = [...seen].sort((a, b) => {
+      const pa = parseDynamicColumnLabel(a);
+      const pb = parseDynamicColumnLabel(b);
+      if (pa.groupOrder !== pb.groupOrder) return pa.groupOrder - pb.groupOrder;
+      if (pa.rate !== pb.rate) return pa.rate - pb.rate;
+      return a.localeCompare(b, 'tr');
+    });
+  }
+
+  function parseDynamicColumnLabel(label) {
+    const m = label.match(/^(.*?)\s*\(%([\d.]+)\)\s*$/);
+    const type = m ? m[1].trim() : label;
+    const rate = m ? parseFloat(m[2]) : Infinity;
+
+    let groupOrder = 3; // taninmayan/diger alanlar en sona
+    if (/matrah/i.test(type)) groupOrder = 0;
+    else if (/tevkifat/i.test(type)) groupOrder = 2;
+    else if (/kdv/i.test(type)) groupOrder = 1;
+
+    return { groupOrder, rate };
+  }
+
+  function toggleRulesPanel(forceCollapsed) {
+    const grid = document.querySelector('.grid');
+    const body = document.getElementById('rulesPanelBody');
+    const icon = document.getElementById('rulesToggleIcon');
+    const collapsed = forceCollapsed !== undefined ? forceCollapsed : !grid.classList.contains('rules-collapsed');
+
+    grid.classList.toggle('rules-collapsed', collapsed);
+    body.style.display = collapsed ? 'none' : '';
+    icon.textContent = collapsed ? '▶' : '▼ Gizle';
+    localStorage.setItem('fatura_mega_rules_panel_collapsed', collapsed ? '1' : '0');
+  }
+
+  function setFilenameColWidth(px) {
+    document.documentElement.style.setProperty('--filename-col-width', px + 'px');
+    localStorage.setItem('fatura_mega_filename_width', px);
+  }
+
+  window.onload = async () => {
+    // Panel açık/kapalı hafızası
+    toggleRulesPanel(localStorage.getItem('fatura_mega_rules_panel_collapsed') === '1');
+
+    // Dosya adı sütun genişliği hafızası
+    const savedWidth = localStorage.getItem('fatura_mega_filename_width');
+    if (savedWidth) {
+      setFilenameColWidth(savedWidth);
+      document.getElementById('filenameWidthSlider').value = savedWidth;
+    }
+
+    // Kural kaynağı önceliği: localStorage (bu profildeki son düzenleme)
+    // -> mega_launcher.bat'ın diskten okuduğu mega_config.json -> kod içi varsayılan
+    const saved = localStorage.getItem('fatura_mega_rules');
+    if (saved) {
+      rules = JSON.parse(saved);
+    } else if (window.MEGA_CONFIG_DEFAULT) {
+      rules = window.MEGA_CONFIG_DEFAULT;
+    } else {
+      rules = defaultRules;
+    }
+    const savedEsmm = localStorage.getItem('fatura_mega_esmm_rules');
+    esmmRules = savedEsmm ? JSON.parse(savedEsmm) : defaultEsmmRules;
+    renderRulesUI();
+
+    // "Gönder" menüsünden dosyalarla açıldıysa (mega_launcher.bat ?auto=1 ile
+    // temp_files.js'i üretti) dosyaları otomatik yükleyip taramayı başlat.
+    // NOT (denendi, geri alindi): dosya yollarını fetch()/XHR ile doğrudan
+    // okumayı denedik (--allow-file-access-from-files bayrağıyla) — gerçek
+    // makinede (kurumsal Edge politikası olası) ikisi de engellendi. base64
+    // gömme hiçbir tarayıcı bayrağına ihtiyaç duymadığı için daha güvenilir.
+    const params = new URLSearchParams(location.search);
+    if (params.get('auto') === '1' && Array.isArray(window.MEGA_FILES) && window.MEGA_FILES.length) {
+      const files = window.MEGA_FILES.map(item => base64ToFile(item.b64, item.fileName));
+      await processFiles(files);
+    }
+  };
+
+  function base64ToFile(b64, fileName) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new File([bytes], fileName, { type: 'application/pdf' });
+  }
+
+  // Sol panelde hangi kural setinin gösterileceğini değiştirir (üstteki
+  // #rulesTypeSelect listbox'ı tetikler). Her iki set de her zaman bellekte
+  // canlı durur — sadece hangisi DÜZENLENEBİLİR olarak gösterildiği değişir;
+  // saveConfig() ikisini de her zaman kaydeder.
+  function switchRulesType(type) {
+    currentRulesType = type;
+    document.getElementById('rulesPanelDesc').textContent = type === 'esmm'
+      ? 'Bu kurallar, metinde "Serbest Meslek Makbuzu" geçen (avukat/muhasebeci vb.) dosyalarda, QR bulunamadığında kullanılır. Alan adları sabittir, sadece deseni düzenleyebilirsiniz.'
+      : 'Bu kurallar sadece QR bulunamayan dosyalarda kullanılır. Alan adları sabittir, sadece deseni düzenleyebilirsiniz.';
+    renderRulesUI();
+  }
+
+  function renderRulesUI() {
+    const container = document.getElementById('rulesContainer');
+    container.innerHTML = '';
+    const activeRules = currentRulesType === 'esmm' ? esmmRules : rules;
+    activeRules.forEach((rule, index) => {
+      const div = document.createElement('div');
+      div.className = 'field-rule';
+      div.innerHTML = `
+        <label>Etiket</label>
+        <input type="text" value="${escapeHtml(rule.label)}" onchange="(${currentRulesType === 'esmm' ? 'esmmRules' : 'rules'})[${index}].label = this.value">
+        <label>Regex Deseni</label>
+        <input type="text" class="regex-input" value="${escapeHtml(rule.regex)}" onchange="(${currentRulesType === 'esmm' ? 'esmmRules' : 'rules'})[${index}].regex = this.value">
+      `;
+      container.appendChild(div);
+    });
+  }
+
+  async function saveConfig() {
+    localStorage.setItem('fatura_mega_rules', JSON.stringify(rules));
+    localStorage.setItem('fatura_mega_esmm_rules', JSON.stringify(esmmRules));
+
+    if (lastFiles.length) {
+      await reapplyRegexToExistingRows();
+    } else {
+      alert('Kurallar kaydedildi! Yüklenen faturalarda bu ayarlar geçerli olacak.');
+    }
+  }
+
+  // QR ile zaten bulunan satırlara dokunmadan, sadece regex'e düşmüş/bulunamamış
+  // satırları yeni kurallarla anında yeniden tarar (dosyaları tekrar yüklemeye gerek kalmaz).
+  async function reapplyRegexToExistingRows() {
+    const targets = rows
+      .map((row, i) => ({ row, i }))
+      .filter(({ row }) => row.source !== 'QR');
+
+    if (!targets.length) {
+      setStatus('Kurallar kaydedildi. (Tüm satırlar zaten QR ile bulunmuştu, regex değişikliği bunları etkilemez.)');
+      return;
+    }
+
+    for (let n = 0; n < targets.length; n++) {
+      const { i } = targets[n];
+      const file = lastFiles[i];
+      if (!file) continue;
+
+      setStatus(`Kurallar kaydedildi, yeniden taranıyor: ${n + 1}/${targets.length}...`);
+
+      let pdf = null;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const regexFields = await tryExtractViaRegex(pdf);
+        rows[i] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
+      } catch (err) {
+        console.error(err);
+        rows[i] = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'Hata: ' + (err.message || String(err)) };
+      } finally {
+        if (pdf) pdf.destroy();
+      }
+    }
+
+    setStatus(`Kurallar kaydedildi ve ${targets.length} satır yeniden tarandı.`);
+    finalizeRows();
+    renderTable();
+    renderInspector();
+  }
+
+  // "Yenile" butonu: kaydet-tetiklemeli kısmi yenilemenin aksine, mevcut
+  // Satıra çift tıklayınca ilgili PDF'i tarayıcının kendi görüntüleyicisinde
+  // yeni sekmede açar (dosya nereden gelmiş olursa olsun - sürükle-bırak,
+  // dosya seçici veya "Gönder" ile otomatik yükleme - lastFiles'ta File olarak duruyor).
+  function openRowPdf(index) {
+    const file = lastFiles[index];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000); // sekme yüklenene kadar bekle, sonra bellekten sil
+  }
+
+  // --- QR Elle İşaretleme (otomatik bulamadığında yedek) ---
+  let qrPickerRowIndex = null;
+  let qrPickerSelection = null; // {x,y,w,h} - sayfanın 0-1 arası fraksiyonu
+  let qrPickerDragStart = null;
+  let qrPickerPdf = null; // modal açıkken sayfa değiştirmede yeniden açmamak için tutuluyor
+  let qrPickerPageNum = 1;
+
+  async function openQrPicker(index) {
+    const file = lastFiles[index];
+    if (!file) return;
+
+    qrPickerRowIndex = index;
+    qrPickerSelection = null;
+    qrPickerPageNum = 1;
+    document.getElementById('qrPickerScanBtn').disabled = true;
+    document.getElementById('qrPickerSelectionBox').style.display = 'none';
+    document.getElementById('qrPickerStatus').textContent = 'Sayfa yükleniyor...';
+    document.getElementById('qrPickerModal').classList.add('open');
+
+    const buf = await file.arrayBuffer();
+    if (qrPickerPdf) { qrPickerPdf.destroy(); qrPickerPdf = null; }
+    qrPickerPdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    await renderQrPickerPage();
+  }
+
+  // Karekod bazen ilk sayfada olmayabiliyor (çok sayfalı hakediş/teklif eki
+  // gibi belgelerde) — bu yüzden picker'ı tek sayfaya kilitlemek yerine
+  // kullanıcının "Önceki/Sonraki Sayfa" ile PDF'in TAMAMINDA gezinebilmesini
+  // sağlıyoruz.
+  async function renderQrPickerPage() {
+    const page = await qrPickerPdf.getPage(qrPickerPageNum);
+    const displayScale = 1.6; // ekranda gösterilecek makul boyut
+    const viewport = page.getViewport({ scale: displayScale });
+    const canvas = document.getElementById('qrPickerCanvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport, intent: 'print' }).promise;
+
+    qrPickerSelection = null;
+    document.getElementById('qrPickerSelectionBox').style.display = 'none';
+    document.getElementById('qrPickerScanBtn').disabled = true;
+    document.getElementById('qrPickerStatus').textContent = 'Karekodun etrafını fare ile sürükleyerek seçin.';
+    document.getElementById('qrPickerPageIndicator').textContent = `Sayfa ${qrPickerPageNum} / ${qrPickerPdf.numPages}`;
+    document.getElementById('qrPickerPrevPage').disabled = qrPickerPageNum <= 1;
+    document.getElementById('qrPickerNextPage').disabled = qrPickerPageNum >= qrPickerPdf.numPages;
+  }
+
+  async function changeQrPickerPage(delta) {
+    if (!qrPickerPdf) return;
+    const next = qrPickerPageNum + delta;
+    if (next < 1 || next > qrPickerPdf.numPages) return;
+    qrPickerPageNum = next;
+    await renderQrPickerPage();
+  }
+
+  function closeQrPicker() {
+    document.getElementById('qrPickerModal').classList.remove('open');
+    document.getElementById('qrPickerSelectionBox').style.display = 'none';
+    qrPickerSelection = null;
+    qrPickerRowIndex = null;
+    qrPickerDragStart = null;
+    if (qrPickerPdf) { qrPickerPdf.destroy(); qrPickerPdf = null; }
+  }
+
+  // --- Tek satırı istenen yöntemle tekrar tarama ---
+  // Sağ tık menüsü yerine (web sayfalarında tarayıcının kendi sağ tık
+  // menüsüyle çakışır, dokunmatik ekranda hiç çalışmaz) satırdaki "⋮"
+  // butonuyla açılan küçük bir menü kullanıyoruz — aynı 📍 butonu gibi
+  // her zaman görünür ve tıklanabilir.
+  function openRescanMenu(event, index) {
+    const menu = document.getElementById('rescanMenu');
+    menu.innerHTML = `
+      <button onclick="rescanRow(${index}, 'auto')">🔄 Otomatik (QR → ZXing → Regex)</button>
+      <button onclick="rescanRow(${index}, 'qr')">🔍 Sadece QR ile tara</button>
+      <button onclick="rescanRow(${index}, 'regex')">📝 Sadece Regex ile tara</button>
+    `;
+    const rect = event.currentTarget.getBoundingClientRect();
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.classList.add('open');
+
+    // Menü dışına tıklayınca veya Esc'e basınca kapansın.
+    const closeOnOutsideClick = (e) => {
+      if (!menu.contains(e.target)) closeRescanMenu();
+    };
+    const closeOnEscape = (e) => {
+      if (e.key === 'Escape') closeRescanMenu();
+    };
+    setTimeout(() => {
+      document.addEventListener('click', closeOnOutsideClick, { once: true });
+      document.addEventListener('keydown', closeOnEscape, { once: true });
+    }, 0);
+  }
+
+  function closeRescanMenu() {
+    document.getElementById('rescanMenu').classList.remove('open');
+  }
+
+  async function rescanRow(index, method) {
+    closeRescanMenu();
+    const file = lastFiles[index];
+    if (!file) return;
+
+    setStatus(`"${file.name}" ${method === 'qr' ? 'QR' : method === 'regex' ? 'Regex' : 'otomatik'} yöntemiyle yeniden taranıyor...`);
+    // tryExtractViaQr her aşama geçişinde bunu çağırıyor — kullanıcı hangi
+    // aşamada olduğumuzu (jsQR üst şerit / sağ-sol yarı / tüm sayfa / ZXing)
+    // görsün diye, "taranıyor..." deyip sessizce kaybolmasın.
+    const onPhase = (text) => setStatus(`"${file.name}": ${text}`);
+
+    let pdf = null;
+    try {
+      const buf = await file.arrayBuffer();
+      pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+
+      if (method === 'qr') {
+        const qrFields = await tryExtractViaQr(pdf, onPhase);
+        if (!qrFields) {
+          setStatus(`"${file.name}" için karekod bulunamadı (jsQR + ZXing, tüm ölçek/bölge kombinasyonları denendi) — satır değiştirilmedi.`);
+          return;
+        }
+        rows[index] = { fileName: file.name, source: 'QR', fields: qrFields.fields, raw: qrFields.raw, parsedQr: qrFields.parsedQr, extraFields: qrFields.extraFields, docType: qrFields.docType };
+      } else if (method === 'regex') {
+        const regexFields = await tryExtractViaRegex(pdf);
+        rows[index] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
+      } else {
+        // Otomatik: normal boru hattıyla aynı sıra — jsQR/ZXing dener, olmazsa regex.
+        const qrFields = await tryExtractViaQr(pdf, onPhase);
+        if (qrFields) {
+          rows[index] = { fileName: file.name, source: 'QR', fields: qrFields.fields, raw: qrFields.raw, parsedQr: qrFields.parsedQr, extraFields: qrFields.extraFields, docType: qrFields.docType };
+        } else {
+          const regexFields = await tryExtractViaRegex(pdf);
+          rows[index] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
+        }
+      }
+
+      finalizeRows();
+      renderTable();
+      if (document.getElementById('pdfSelect').value == index) renderInspector();
+      setStatus(`"${file.name}" güncellendi.`);
+    } catch (err) {
+      console.error(err);
+      setStatus(`"${file.name}" taranırken hata oluştu: ${err.message || err}`);
+    } finally {
+      if (pdf) pdf.destroy();
+    }
+  }
+
+  (() => {
+    const wrap = document.getElementById('qrPickerCanvasWrap');
+    const box = document.getElementById('qrPickerSelectionBox');
+
+    function pointerPos(e) {
+      const rect = wrap.getBoundingClientRect();
+      return { x: e.clientX - rect.left + wrap.scrollLeft, y: e.clientY - rect.top + wrap.scrollTop };
+    }
+
+    wrap.addEventListener('mousedown', (e) => {
+      qrPickerDragStart = pointerPos(e);
+      box.style.left = qrPickerDragStart.x + 'px';
+      box.style.top = qrPickerDragStart.y + 'px';
+      box.style.width = '0px';
+      box.style.height = '0px';
+      box.style.display = 'block';
+      document.getElementById('qrPickerScanBtn').disabled = true;
+    });
+
+    wrap.addEventListener('mousemove', (e) => {
+      if (!qrPickerDragStart) return;
+      const cur = pointerPos(e);
+      const x = Math.min(qrPickerDragStart.x, cur.x), y = Math.min(qrPickerDragStart.y, cur.y);
+      const w = Math.abs(cur.x - qrPickerDragStart.x), h = Math.abs(cur.y - qrPickerDragStart.y);
+      box.style.left = x + 'px'; box.style.top = y + 'px';
+      box.style.width = w + 'px'; box.style.height = h + 'px';
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (!qrPickerDragStart) return;
+      const cur = pointerPos(e);
+      const canvas = document.getElementById('qrPickerCanvas');
+      const x = Math.min(qrPickerDragStart.x, cur.x), y = Math.min(qrPickerDragStart.y, cur.y);
+      const w = Math.abs(cur.x - qrPickerDragStart.x), h = Math.abs(cur.y - qrPickerDragStart.y);
+      qrPickerDragStart = null;
+
+      if (w < 12 || h < 12 || !canvas.width) { box.style.display = 'none'; return; } // çok küçük seçim, yok say
+
+      qrPickerSelection = { x: x / canvas.width, y: y / canvas.height, w: w / canvas.width, h: h / canvas.height };
+      document.getElementById('qrPickerScanBtn').disabled = false;
+      document.getElementById('qrPickerStatus').textContent = 'Seçim tamam — "Bu Bölgeyi Tara"ya basın.';
+    });
+  })();
+
+  // --- PDF içindeki görsel nesneleri doğrudan ham baytlardan çözme ---
+  // Bazı PDF'lerde görsel nesnenin kendisi gömülü olarak kırpılmış oluyor
+  // (ör. Adobe'de düzenlenirken) — bu durumda render+kırpma zinciri hangi
+  // ölçekte denenirse denensin karekodun bir kısmı hiç çizilmiyor. Bu
+  // fonksiyon PDF'in ham stream baytlarını doğrudan açıp (FlateDecode/
+  // DCTDecode) render/kırpma adımını tamamen atlıyor. Sadece elle
+  // işaretleme ekranında, "Tara" başarısız olduğunda son çare olarak
+  // çalışır — her PDF'teki tüm görselleri açmak pahalı olduğu için toplu
+  // taramada (processFiles) ASLA otomatik tetiklenmez.
+
+  async function extractPdfImageObjects(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    const text = new TextDecoder('iso-8859-1').decode(bytes);
+    const objRe = /(\d+)\s+0\s+obj\s*<<([^]*?)>>\s*stream\r?\n/g;
+    const objects = [];
+    let m;
+    while ((m = objRe.exec(text))) {
+      const [full, num, dict] = m;
+      if (!/\/Subtype\s*\/Image/.test(dict)) continue;
+      const widthM = dict.match(/\/Width\s+(\d+)/);
+      const heightM = dict.match(/\/Height\s+(\d+)/);
+      if (!widthM || !heightM) continue;
+      const width = parseInt(widthM[1], 10);
+      const height = parseInt(heightM[1], 10);
+      const colorSpaceM = dict.match(/\/ColorSpace\s*\/(\w+)/);
+      const colorSpace = colorSpaceM ? colorSpaceM[1] : null;
+      const filterArrM = dict.match(/\/Filter\s*\[([^\]]+)\]/);
+      const filterOneM = dict.match(/\/Filter\s*\/(\w+)/);
+      const filters = filterArrM
+        ? (filterArrM[1].match(/\/(\w+)/g) || []).map(s => s.slice(1))
+        : (filterOneM ? [filterOneM[1]] : []);
+      const smaskM = dict.match(/\/SMask\s+(\d+)\s+0\s+R/);
+      const smaskNum = smaskM ? smaskM[1] : null;
+
+      const start = m.index + full.length;
+      const endIdx = text.indexOf('endstream', start);
+      if (endIdx === -1) continue;
+      let end = endIdx;
+      while (end > start && (bytes[end - 1] === 0x0A || bytes[end - 1] === 0x0D)) end--;
+      const streamBytes = bytes.slice(start, end);
+
+      objects.push({ num, width, height, colorSpace, filters, smaskNum, streamBytes });
+    }
+    const byNum = {};
+    objects.forEach(o => { byNum[o.num] = o; });
+    objects.forEach(o => { if (o.smaskNum) o.smask = byNum[o.smaskNum]; });
+    return objects;
+  }
+
+  async function inflateZlibBytes(bytes) {
+    const ds = new DecompressionStream('deflate');
+    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+    const buf = await new Response(stream).arrayBuffer();
+    return new Uint8Array(buf);
+  }
+
+  async function decodeJpegBytesToImageData(bytes) {
+    const blob = new Blob([bytes], { type: 'image/jpeg' });
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width; canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  async function decodePdfImageObject(obj) {
+    let raw = obj.streamBytes;
+    let filters = obj.filters.slice();
+
+    if (filters[0] === 'FlateDecode') {
+      raw = await inflateZlibBytes(raw);
+      filters = filters.slice(1);
+    }
+
+    if (filters[0] === 'DCTDecode') {
+      return await decodeJpegBytesToImageData(raw);
+    }
+
+    if (filters.length) return null; // CCITT/JPX vb. desteklenmiyor, atla
+
+    const w = obj.width, h = obj.height;
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    let alphaData = null;
+    if (obj.smask) {
+      const smaskImg = await decodePdfImageObject(obj.smask);
+      if (smaskImg) alphaData = smaskImg.data;
+    }
+
+    if (obj.colorSpace === 'DeviceRGB' && raw.length >= w * h * 3) {
+      for (let i = 0; i < w * h; i++) {
+        rgba[i * 4] = raw[i * 3];
+        rgba[i * 4 + 1] = raw[i * 3 + 1];
+        rgba[i * 4 + 2] = raw[i * 3 + 2];
+        rgba[i * 4 + 3] = alphaData ? alphaData[i * 4] : 255;
+      }
+    } else if (obj.colorSpace === 'DeviceGray' && raw.length >= w * h) {
+      for (let i = 0; i < w * h; i++) {
+        rgba[i * 4] = raw[i];
+        rgba[i * 4 + 1] = raw[i];
+        rgba[i * 4 + 2] = raw[i];
+        rgba[i * 4 + 3] = alphaData ? alphaData[i * 4] : 255;
+      }
+    } else {
+      return null; // desteklenmeyen renk uzayı
+    }
+    return new ImageData(rgba, w, h);
+  }
+
+  function isQrLikeImageObject(obj) {
+    if (obj.width < 40 || obj.height < 40) return false;
+    if (obj.width > 700 || obj.height > 700) return false; // fotoğraf/logo yerine karekod adayı
+    const ratio = obj.width / obj.height;
+    return ratio > 0.75 && ratio < 1.33; // kareye yakın
+  }
+
+  async function tryNativeExtractionFallback(arrayBuffer) {
+    let objects;
+    try {
+      objects = await extractPdfImageObjects(arrayBuffer);
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+    const candidates = objects.filter(isQrLikeImageObject);
+
+    for (const obj of candidates) {
+      let imageData;
+      try {
+        imageData = await decodePdfImageObject(obj);
+      } catch (err) {
+        continue;
+      }
+      if (!imageData) continue;
+
+      // Sonra kenarları bulanıklaştırmayan (nearest-neighbor) büyütmelerle dene —
+      // kaynak veri az pikselli olsa bile keskin modül kenarları korunur.
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = imageData.width; srcCanvas.height = imageData.height;
+      srcCanvas.getContext('2d').putImageData(imageData, 0, 0);
+
+      // Önce native çözünürlükte dene (tryScanRegion: ZXing sonra jsQR)
+      let result = await tryScanRegion(srcCanvas, null);
+      if (result) return result;
+
+      for (const scale of [3, 5, 8, 12]) {
+        const big = document.createElement('canvas');
+        big.width = imageData.width * scale;
+        big.height = imageData.height * scale;
+        const bctx = big.getContext('2d');
+        bctx.imageSmoothingEnabled = false;
+        bctx.drawImage(srcCanvas, 0, 0, big.width, big.height);
+        result = await tryScanRegion(big, null);
+        if (result) return result;
+      }
+    }
+    return null;
+  }
+
+  async function scanQrPickerSelection() {
+    if (!qrPickerSelection || qrPickerRowIndex === null) return;
+    const index = qrPickerRowIndex;
+    const file = lastFiles[index];
+    if (!file) return;
+
+    document.getElementById('qrPickerStatus').textContent = 'Taranıyor...';
+    document.getElementById('qrPickerScanBtn').disabled = true;
+
+    let found = null;
+    let pdf = null;
+    let buf = null;
+    try {
+      buf = await file.arrayBuffer();
+      pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const page = await pdf.getPage(qrPickerPageNum); // kullanıcının picker'da gezip durduğu sayfa
+
+      // Kullanıcının işaretlediği tam bölge biliniyor — otomatik tarama
+      // (SCAN_PASSES) zaten bulamadığı için buraya gelindi, yani burada
+      // BİLEREK çok daha detaylı/geniş bir ölçek listesi kullanıyoruz
+      // (otomatik toplu taramadaki gibi hıza öncelik vermiyoruz): tek
+      // dosya, kullanıcı zaten bekliyor, elle çabaya değer. tryScanRegion
+      // içeride önce ZXing'i (hızlı+toleranslı), sonra jsQR'ı deniyor —
+      // ayrı bir "ZXing dene" adımına gerek yok.
+      for (const scale of [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0, 8.0, 9.0, 10.0]) {
+        const canvas = await renderPageToCanvas(page, scale);
+        const cropped = cropCanvas(canvas, qrPickerSelection);
+        found = await tryScanRegion(cropped, null);
+        if (found) break;
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      if (pdf) pdf.destroy();
+    }
+
+    if (!found && buf) {
+      // Render+kırpma boru hattı başarısız oldu — son çare olarak PDF'in
+      // içindeki görsel nesneyi ham baytlardan doğrudan çözüp deniyoruz.
+      document.getElementById('qrPickerStatus').textContent = 'Normal tarama başarısız oldu, PDF içindeki görsel doğrudan deneniyor...';
+      try {
+        found = await tryNativeExtractionFallback(buf);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    if (found) {
+      const qrResult = buildQrResult(found);
+      rows[index] = { fileName: file.name, source: 'QR', fields: qrResult.fields, raw: qrResult.raw, parsedQr: qrResult.parsedQr, extraFields: qrResult.extraFields, docType: qrResult.docType };
+      finalizeRows();
+      renderTable();
+      if (document.getElementById('pdfSelect').value == index) renderInspector();
+      setStatus(`"${file.name}" için karekod bulundu ve satır güncellendi.`);
+      closeQrPicker();
+    } else {
+      document.getElementById('qrPickerStatus').textContent = 'Bu bölgede karekod bulunamadı. Seçimi biraz genişletip tekrar deneyin.';
+      document.getElementById('qrPickerScanBtn').disabled = false;
+    }
+  }
+
+  // Bir satırı seçer: Ham Veri Önizleme listesinden dosyayı seçer, satırı
+  // mavi vurgular ve görünür alana kaydırır. Hem tıklama hem ok tuşlarıyla
+  // gezinme bunu kullanıyor, tek yerden yönetilsin diye.
+  function selectRow(index) {
+    if (index < 0 || index >= rows.length) return;
+    document.getElementById('pdfSelect').value = index;
+    const tbody = document.getElementById('tableBody');
+    tbody.querySelectorAll('tr.selected-row').forEach(r => r.classList.remove('selected-row'));
+    const tr = tbody.children[index];
+    if (tr) {
+      tr.classList.add('selected-row');
+      tr.scrollIntoView({ block: 'nearest' });
+    }
+    renderInspector();
+  }
+
+  // Bir fatura seçiliyken ↑/↓ ile önceki/sonraki faturaya geçer. Kullanıcı bir
+  // yazı kutusuna (regex deseni, kaydırıcı vb.) odaklanmışsa karışmaz.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+
+    const activeTag = document.activeElement && document.activeElement.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+
+    const selectEl = document.getElementById('pdfSelect');
+    if (!rows.length || selectEl.value === '') return;
+
+    e.preventDefault();
+    const current = parseInt(selectEl.value, 10);
+    const next = e.key === 'ArrowUp' ? current - 1 : current + 1;
+    selectRow(Math.max(0, Math.min(rows.length - 1, next)));
+  });
+
+  // QR/Regex seçim kutuları ve kurallarla TÜM listeyi baştan yeniden tarar
+  // (QR satırları dahil) — kullanıcı toggle'ları değiştirip yeniden denemek isterse.
+  async function refreshAll() {
+    if (!lastFiles.length) {
+      alert('Önce dosya yükleyin.');
+      return;
+    }
+    await processFiles(lastFiles);
+  }
+
+  function exportConfig() {
+    // Ekranda o an hangi kural seti gösteriliyorsa onu indirir.
+    const activeRules = currentRulesType === 'esmm' ? esmmRules : rules;
+    const fileName = currentRulesType === 'esmm' ? 'mega_config_serbest_meslek.json' : 'mega_config.json';
+    const blob = new Blob([JSON.stringify(activeRules, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  document.getElementById('importConfigInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const imported = JSON.parse(text);
+      if (!Array.isArray(imported)) throw new Error('Dosya bir kural listesi (dizi) içermiyor.');
+      // İçe aktarılan dosya, ekranda o an hangi kural seti gösteriliyorsa ona yazılır.
+      if (currentRulesType === 'esmm') esmmRules = imported; else rules = imported;
+      renderRulesUI();
+      await saveConfig();
+    } catch (err) {
+      alert('İçe aktarma başarısız: ' + err.message);
+    }
+  });
+
+  function escapeHtml(str) {
+    return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // Sürükle Bırak / Dosya Seçme
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const statusMsg = document.getElementById('status-msg');
+
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) processFiles(e.dataTransfer.files);
+  });
+  fileInput.addEventListener('change', (e) => processFiles(e.target.files));
+
+  function setStatus(text) {
+    statusMsg.textContent = text;
+  }
+
+  let cancelRequested = false;
+
+  function cancelProcessing() {
+    cancelRequested = true;
+    setStatus('İptal ediliyor... (mevcut dosya bitince duracak)');
+  }
+
+  function showProgress(pct) {
+    document.getElementById('progressContainer').style.display = 'flex';
+    document.getElementById('progressBar').value = pct;
+  }
+
+  function hideProgress() {
+    document.getElementById('progressContainer').style.display = 'none';
+  }
+
+  async function processFiles(fileList) {
+    const files = [...fileList].filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (!files.length) return;
+    lastFiles = files;
+
+    const useQr = document.getElementById('toggle-qr').checked;
+    const useRegex = document.getElementById('toggle-regex').checked;
+
+    if (!useQr && !useRegex) {
+      alert('En az bir tarama yöntemi (QR veya Regex) seçili olmalı.');
+      return;
+    }
+
+    rows = [];
+    cancelRequested = false;
+    showProgress(0);
+
+    for (let i = 0; i < files.length; i++) {
+      if (cancelRequested) {
+        setStatus(`İptal edildi: ${rows.length}/${files.length} dosya işlendi.`);
+        break;
+      }
+
+      const file = files[i];
+
+      let row;
+      let pdf = null;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+        let qrFields = null;
+        if (useQr) {
+          const onPhase = (text) => setStatus(`Dosya ${i + 1}/${files.length}: ${file.name} — ${text}`);
+          onPhase('QR aranıyor...');
+          qrFields = await tryExtractViaQr(pdf, onPhase);
+        }
+
+        if (qrFields) {
+          row = { fileName: file.name, source: 'QR', fields: qrFields.fields, raw: qrFields.raw, parsedQr: qrFields.parsedQr, extraFields: qrFields.extraFields, docType: qrFields.docType };
+        } else if (useRegex) {
+          setStatus(`Dosya ${i + 1}/${files.length}: ${file.name} — ${useQr ? 'QR bulunamadı, regex ile deneniyor...' : 'regex ile aranıyor...'}`);
+          const regexFields = await tryExtractViaRegex(pdf);
+          row = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
+        } else {
+          row = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'QR bulunamadı (regex kapalı).' };
+        }
+      } catch (err) {
+        console.error(err);
+        row = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'Hata: ' + (err.message || String(err)) };
+      } finally {
+        // pdf.js her açılan belge için bir Worker ayırıyor; temizlenmezse
+        // toplu (çoklu dosya) taramada worker'lar birikip tarayıcıyı kilitler.
+        if (pdf) pdf.destroy();
+      }
+
+      rows.push(row);
+      showProgress(Math.round(((i + 1) / files.length) * 100));
+    }
+
+    // İptal edilmişse lastFiles'ı da işlenen kısımla eşle (index bütünlüğü için).
+    if (cancelRequested) lastFiles = files.slice(0, rows.length);
+
+    hideProgress();
+    if (!cancelRequested) setStatus(`${rows.length} dosya işlendi.`);
+    dropZone.classList.toggle('compact', rows.length > 0);
+    finalizeRows();
+    rebuildPdfSelect();
+    renderTable();
+    renderInspector();
+  }
+
+  // ==========================================================================
+  // KAREKOD TARAMA STRATEJİSİ — SİSTEMATİK GEÇİŞ LİSTESİ
+  // ==========================================================================
+  // Her "geçiş" (pass) bir bölge + bir ölçek kümesidir. tryExtractViaQr bunları
+  // SIRAYLA dener (ilk bulan kazanır); her geçiş öncesi onPhase() ile hangi
+  // geçişte olduğumuz bildiriliyor. Yeni bir geçiş eklemek / kaldırmak /
+  // sırasını değiştirmek istersen SADECE bu listeyi düzenle — döngü kodu
+  // (tryExtractViaQr) hiç değişmiyor.
+  //
+  // Bölge koordinatları {x,y,w,h} sayfanın 0-1 arası fraksiyonu (0,0 = sol üst).
+  //
+  // Sıralama ve kapsam gerçek 75 dosyalık toplu ölçümle belirlendi:
+  //  - Karekod neredeyse hep SAĞ üst köşede, çok daha nadiren SOL üst köşede.
+  //    Tam genişlikte taramayı önce yapmak (eski davranış) en YAYGIN durumu
+  //    en SONA bırakıyordu — artık tersi.
+  //  - "Tüm sayfa karo karo" geçişi (eskiden FULLPAGE_SCALES) TAMAMEN
+  //    KALDIRILDI: hiçbir gerçek dosyada bu geçişin QR bulduğu görülmedi,
+  //    sadece "QR hiç yok" dosyalarında saf maliyetti (~20 ek deneme).
+  //    Otomatik tarama üst çeyrek dışında bir QR'ı bulamazsa, manuel
+  //    işaretleme (📍, openQrPicker) zaten yedek çözüm.
+  //  - Ölçek listeleri eskiden (jsQR tek başınayken, hassas/huysuzken) çok
+  //    daha kalabalıktı (~20 değer). ZXing birincil motor olunca (bkz.
+  //    tryScanRegion) buna gerek kalmadığı ölçüldü — bilinen zor vakalar
+  //    (zor okunan bazı karekodlar) bu küçük setlerle de bozulmadan
+  //    çözülüyor, "QR hiç yok" dosyalarında toplam süre ~2-2,3 kat düştü.
+  const SCAN_PASSES = [
+    {
+      name: 'Sağ üst köşe',
+      regions: [{ x: 0.55, y: 0.0, w: 0.45, h: 0.30 }], // en yaygın konum
+      scales: [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0]
+    },
+    {
+      name: 'Sol üst köşe',
+      regions: [{ x: 0.0, y: 0.0, w: 0.45, h: 0.30 }], // ikinci en yaygın
+      scales: [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0]
+    },
+    {
+      name: 'Üst şerit (tam genişlik) — güvenlik ağı',
+      // Köşeler bulamazsa devreye giriyor: QR köşede değilse (ör. tam üst-
+      // orta), ya da köşe kırpması kenarını kesmişse bu geçiş yakalıyor.
+      regions: [{ x: 0.0, y: 0.0, w: 1.0, h: 0.25 }],
+      scales: [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0]
+    },
+    {
+      name: 'Tüm sayfa (kırpmasız) — son güvenlik ağı',
+      // 75 dosyalık gerçek batch testiyle bulundu: bazı dosyalarda QR görsel olarak üst
+      // çeyrekte olsa bile, KIRPILMIŞ bölgede değil kırpmasız TAM sayfada
+      // çözülüyor — muhtemelen kırpma sınırı QR'ın kenarına çok yakın
+      // düşüyor. 3x3 karo tarama (eski scanCanvasForQr) bunu da yakalıyordu
+      // ama çok pahalıydı (~20 ek deneme); sadece kırpmasız tam sayfayı
+      // denemek çok daha ucuza (dosya başına 2 ek deneme) aynı vakaların
+      // çoğunu (4'te 3) yakalıyor. Kalan nadir vakalar (grid'in
+      // belirli bir karosunda bulunuyor) için manuel işaretleme (📍) yedek.
+      regions: [{ x: 0.0, y: 0.0, w: 1.0, h: 1.0 }],
+      scales: [2.5, 4.0]
+    }
+  ];
+  // NOT (dürüst kayıt — burada bir hata yaptık, düzeltme süreci): İlk
+  // denemede ölçek listelerini çok agresif küçültmüştük (köşe: 3 değer,
+  // şerit: 4 değer) VE "tüm sayfa" geçişini tamamen kaldırmıştık. Küçük bir
+  // örneklemde (6 dosya) hiçbir şey bozulmamış GİBİ görünmüştü — ama TAM 75
+  // dosyalık batch'te QR başarı oranı %77'den %65'e gerilediğini gördük.
+  // Kök neden ikiye ayrıldı: (1) bazı dosyalar atlanan ara ölçek
+  // değerlerine ihtiyaç duyuyordu (ör. ara scale=4), (2) bazı
+  // dosyalar gerçekten "tüm sayfa kırpmasız" geçişine ihtiyaç duyuyordu. İkisini de geri ekleyip tekrar 75 dosyalık
+  // batch'le doğruladık. Ders: küçük örneklemli testler yanıltıcı olabilir,
+  // performans değişikliklerini her zaman TAM veri setiyle doğrula.
+
+  // onPhase(text): opsiyonel — her geçiş başında çağrılır (ölçek başına değil,
+  // geçiş başına — toplu taramada ekran titremesin diye). Hiçbir geçiş
+  // bulamazsa fonksiyon sessizce null dönüyormuş GİBİ görünüyordu — aslında
+  // hep dönüyordu ama arayüzde hangi geçişlerden geçip başarısız olduğu
+  // görünmüyordu.
+  async function tryExtractViaQr(pdf, onPhase) {
+    if (typeof jsQR === 'undefined') return null;
+    const phase = (text) => { if (onPhase) onPhase(text); };
+
+    // YANLIŞ VARSAYIM DÜZELTİLDİ (75 dosyalık batch'te bulundu): "Karekod
+    // her zaman ilk sayfada olur" dediğimiz için önceden sadece 1. sayfayı
+    // tarıyorduk — ama çok sayfalı bazı gerçek
+    // faturalarda QR 2. (hatta daha sonraki) sayfada olabiliyor. Artık TÜM
+    // sayfaları deniyoruz, ama maliyet endişesi yersiz: döngü sadece bir
+    // sayfa TAMAMEN başarısız olursa (tüm SCAN_PASSES tükenirse) bir
+    // sonrakine geçiyor — QR'ın (yaygın durum) ilk sayfada olduğu
+    // dosyalarda hiçbir ek maliyet yok, sadece gerçekten ilk sayfada
+    // bulunamayan nadir dosyalarda ekstra sayfalar deneniyor.
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+      const page = await pdf.getPage(pageNo);
+
+      for (const pass of SCAN_PASSES) {
+        phase(`${pdf.numPages > 1 ? `Sayfa ${pageNo}/${pdf.numPages}: ` : ''}${pass.name} taranıyor...`);
+        for (const region of pass.regions) {
+          for (const scale of pass.scales) {
+            const canvas = await renderPageToCanvas(page, scale);
+            const cropped = cropCanvas(canvas, region);
+            // tryScanRegion önce ZXing'i (hızlı+toleranslı), sonra jsQR'ı
+            // dener — ayrı bir "ZXing fazı"na gerek yok, tek deneme yeterli.
+            const rawCode = await tryScanRegion(cropped, null);
+            if (rawCode) {
+              return buildQrResult(rawCode);
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // ==========================================================================
+  // e-SMM (SERBEST MESLEK MAKBUZU) DESTEĞİ
+  // ==========================================================================
+  // Gerçek örneklerle keşfedildi: e-SMM'in QR şeması e-Fatura'dan TAMAMEN
+  // FARKLI — hatta e-SMM'in KENDİ İÇİNDE de en az 2 farklı vendor varyantı
+  // görüldü:
+  //   Varyant 1 (minimal, bir e-SMM yazılımı):
+  //     {"tur":"e-SMM","ETTN":...,"no":...,"tarih":"...","net":"...","tahsilat":"...","VKNTCKN":"..."}
+  //     — sadece net ücret ve net tahsilat var, KDV/stopaj kırılımı YOK,
+  //     alıcı VKN'si bile YOK. Doğrulama yapılamaz, sadece bilgi amaçlı.
+  //   Varyant 2 (detaylı, başka bir e-SMM yazılımı, "tur" alanı
+  //     bile yok): {"no":...,"avkntckn":...,"brutucret":...,"kdvtutari":...,
+  //     "kdvtevkifat":...,"tahsilkdv":...,"gvstopaj":...,"netucret":...,"tahsilat":...}
+  //     — tam kırılım var, çapraz kontrol mümkün (bkz. checkEsmmTutarlar).
+  // e-Fatura'nın "Mal/Hizmet Toplamı / Vergiler Dahil Toplam / Ödenecek
+  // Tutar / KDV Matrahı-Tevkifat" kavram seti burada YOK — yerine "Brüt
+  // Ücret / G.V. Stopaj (gelir vergisi kesintisi, KDV'den TAMAMEN AYRI bir
+  // vergi türü) / Net Ücret / KDV Tevkifatı / Net Tahsilat" var. Bu yüzden
+  // e-Fatura alan eşleştirmesini zorla uydurmaya çalışmak yerine (hiçbir
+  // alanı bulamayıp satırı boş bırakırdı) ayrı bir yol izliyoruz.
+  function isEsmmPayload(obj) {
+    const norm = k => k.replace(/[\s_]+/g, '').toLowerCase();
+    const keys = Object.keys(obj).map(norm);
+    const turKey = Object.keys(obj).find(k => norm(k) === 'tur');
+    if (turKey && /smm/i.test(String(obj[turKey]))) return true;
+    // "tur" alanı olmayan varyant için: bu anahtarlardan
+    // biri varsa da e-SMM'dir — e-Fatura QR'ında bunlar hiç geçmiyor.
+    const esmmMarkers = ['brutucret', 'netucret', 'gvstopaj', 'kdvtevkifat', 'tahsilkdv'];
+    return esmmMarkers.some(m => keys.includes(m));
+  }
+
+  function buildEsmmQrResult(obj, rawCode) {
+    const norm = k => k.replace(/[\s_]+/g, '').toLowerCase();
+    const keys = Object.keys(obj);
+    const consumed = new Set();
+    const find = (...patterns) => {
+      for (const pattern of patterns) {
+        const key = keys.find(k => pattern.test(norm(k)));
+        // Bazı yazılımlar değer başına/sonuna sızmış
+        // boşluk bırakıyor (ör. " 19-08-2026") — trim() ile temizliyoruz.
+        if (key && obj[key]) { consumed.add(key); return String(obj[key]).trim(); }
+      }
+      return '';
+    };
+
+    const rawBrut = find(/^brutucret$/);
+    const rawKdv = find(/^kdvtutari$/);
+    const rawKdvTevkifat = find(/^kdvtevkifat$/);
+    const rawTahsilKdv = find(/^tahsilkdv$/);
+    const rawStopaj = find(/^gvstopaj$/);
+    const rawNetUcret = find(/^netucret$/);
+    const rawNetMinimal = find(/^net$/); // sadece Varyant 1'de (minimal şema) var
+    const rawTahsilat = find(/^tahsilat$/);
+
+    // "Vergiler Dahil Toplam"ın e-SMM karşılığı: Brüt Ücret + KDV (stopaj/
+    // tevkifat kesintisi ÖNCESİ) — e-Fatura'daki alanla aynı konumda.
+    let vergiDahil = '';
+    const numBrut = parseFlexibleAmount(rawBrut), numKdv = parseFlexibleAmount(rawKdv);
+    if (!isNaN(numBrut) && !isNaN(numKdv)) vergiDahil = fmtNum(numBrut + numKdv);
+
+    const fields = {
+      faturaNo: find(/^no$/),
+      tarih: normalizeDate(find(/^tarih$/)),
+      vkn: find(/^vkntckn$/),
+      avkn: find(/^avkntckn$/), // Varyant 1'de yok, boş kalır
+      senaryo: '',
+      faturaTipi: 'SERBEST MESLEK MAKBUZU',
+      paraBirimi: find(/^parabirimi$/),
+      malHizmet: formatQrAmount(rawBrut), // Varyant 1'de boş kalır (veri yok, uydurmuyoruz)
+      vergiDahil,
+      odenecek: formatQrAmount(rawTahsilat || rawNetMinimal),
+      ettn: find(/^ettn$/)
+    };
+
+    // Rate-suffix'siz (parantez+% içermeyen) etiketler kullanıyoruz — bu
+    // yüzden buildRateMap() bunları YAPISAL olarak görmezden gelir, e-Fatura
+    // doğrulama formüllerine (Kural 1/2/2b/3) hiç karışmazlar (tıpkı "Olası
+    // İskonto" gibi). Aynı isimler regex yolunda da (extractEsmmFields)
+    // kullanılıyor ki iki kaynaktan gelen aynı kavram aynı sütunda birleşsin.
+    const extraFields = {};
+    if (rawBrut) extraFields['Brüt Ücret'] = formatQrAmount(rawBrut);
+    if (rawKdv) extraFields['KDV Tutarı (Serbest Meslek)'] = formatQrAmount(rawKdv);
+    if (rawStopaj) extraFields['G.V. Stopaj Tutarı'] = formatQrAmount(rawStopaj);
+    if (rawNetUcret) extraFields['Net Ücret'] = formatQrAmount(rawNetUcret);
+    if (rawKdvTevkifat) extraFields['KDV Tevkifatı (Serbest Meslek)'] = formatQrAmount(rawKdvTevkifat);
+    if (rawTahsilKdv) extraFields['Tahsil Edilen KDV'] = formatQrAmount(rawTahsilKdv);
+    if (rawTahsilat) extraFields['Net Tahsilat'] = formatQrAmount(rawTahsilat);
+    else if (rawNetMinimal) extraFields['Net Ücret (Minimal QR — kırılım yok)'] = formatQrAmount(rawNetMinimal);
+
+    // Eşlenmeyen her şey (tur, ya da vendor'a özgü ek alanlar) kaybolmasın.
+    keys.forEach(k => {
+      if (consumed.has(k) || !obj[k]) return;
+      const isAmountLike = /kdv|tutar|matrah|ucret|stopaj/i.test(k);
+      extraFields[labelForQrKey(k)] = isAmountLike ? (formatQrAmount(obj[k]) || obj[k]) : obj[k];
+    });
+
+    return { raw: rawCode, parsedQr: obj, fields, extraFields, docType: 'ESMM' };
+  }
+
+  function buildQrResult(rawCode) {
+    const obj = parseQrPayload(rawCode);
+    if (isEsmmPayload(obj)) return buildEsmmQrResult(obj, rawCode);
+    // e-Fatura yazılımına göre anahtar isimleri değişiyor (VknTckn / vkntckn,
+    // MalHizmet / malhizmettoplam, vb.) — normalize edip esnek eşleştiriyoruz.
+    const norm = k => k.replace(/[\s_]+/g, '').toLowerCase();
+    const keys = Object.keys(obj);
+    const consumed = new Set(); // sabit alana eşlenen anahtarlar - extraFields'a tekrar düşmesin
+    const find = (...patterns) => {
+      for (const pattern of patterns) {
+        const key = keys.find(k => pattern.test(norm(k)));
+        if (key && obj[key]) { consumed.add(key); return obj[key]; }
+      }
+      return '';
+    };
+
+    const fields = {
+      faturaNo: find(/^no$/, /^faturano$/),
+      tarih: normalizeDate(find(/^tarih$/)),
+      vkn: find(/^vkntckn$/),
+      avkn: find(/^avkntckn$/),
+      senaryo: find(/^senaryo$/),
+      faturaTipi: find(/^tip$/),
+      paraBirimi: find(/^parabirimi$/),
+      // QR tutarları "400000.00" gibi noktalı geliyor; regex'ten gelen tutarlarla
+      // (ör. "400.000,00") tutarlı olsun diye Türkçe sayı formatına çeviriyoruz.
+      malHizmet: formatQrAmount(find(/^malhizmet$/, /^malhizmettoplam$/)),
+      vergiDahil: formatQrAmount(find(/^vergidahil$/)),
+      odenecek: formatQrAmount(find(/^odenecek$/)),
+      ettn: find(/^ettn$/)
+    };
+
+    // Sabit alana eşlenmeyen HER ŞEY (farklı KDV oranları, KDV matrahı,
+    // tevkifat, ileride çıkabilecek başka vergi/vendor'a özel alanlar) kendi
+    // başlıklı dinamik sütununa dönüşür — kod değişikliği gerekmeden.
+    const extraFields = {};
+    keys.forEach(k => {
+      if (consumed.has(k) || !obj[k]) return;
+      const isAmountLike = /kdv|tutar|matrah/i.test(k);
+      extraFields[labelForQrKey(k)] = isAmountLike ? (formatQrAmount(obj[k]) || obj[k]) : obj[k];
+    });
+
+    return { raw: rawCode, parsedQr: obj, fields, extraFields };
+  }
+
+  // Tarihleri kaynak ne olursa olsun (QR zaten çoğunlukla ISO verir, regex
+  // GG-AA-YYYY / GG.AA.YYYY / GG/AA/YYYY gibi farklı biçimler yakalayabilir)
+  // tek tip YYYY-AA-GG'ye çevirir. Tanınmayan bir biçimse dokunmadan bırakır.
+  function normalizeDate(value) {
+    if (!value) return value;
+
+    // Zaten GG-AA-YYYY ise dokunma
+    if (/^\d{2}-\d{2}-\d{4}$/.test(value)) return value;
+
+    // YYYY-AA-GG (QR'dan ISO gelir) -> GG-AA-YYYY
+    let m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const [, yyyy, mm, dd] = m;
+      return `${dd}-${mm}-${yyyy}`;
+    }
+
+    // GG.AA.YYYY / GG/AA/YYYY -> GG-AA-YYYY (ayraç birleştirilir)
+    m = value.match(/^(\d{2})[.\/-](\d{2})[.\/-](\d{4})$/);
+    if (m) {
+      const [, dd, mm, yyyy] = m;
+      return `${dd}-${mm}-${yyyy}`;
+    }
+
+    return value; // tanınmayan biçim: olduğu gibi bırak
+  }
+
+  // QR payload'ındaki tutarlar genelde İngilizce format (nokta ondalık,
+  // "2500.00"), ama bazı yazılımlar standart dışı
+  // davranıp Türkçe format (nokta binlik, virgül ondalık, "2.500,00")
+  // gönderiyor. Basit parseFloat bunu YANLIŞ okuyor ("2.500,00" -> 2.5,
+  // virgülden sonrasını hiç görmüyor). En SON görülen ayraç (nokta ya da
+  // virgül, hangisi metnin sonuna daha yakınsa) her zaman ondalık ayracıdır
+  // — bu kuralla iki formatı da güvenle ayırt ediyoruz.
+  function parseFlexibleAmount(raw) {
+    const s = String(raw).trim();
+    const lastComma = s.lastIndexOf(',');
+    const lastDot = s.lastIndexOf('.');
+    let normalized;
+    if (lastComma > lastDot) {
+      // Türkçe format: nokta binlik ayracı (silinir), virgül ondalık (noktaya çevrilir)
+      normalized = s.replace(/\./g, '').replace(',', '.');
+    } else if (lastDot > lastComma) {
+      // İngilizce format: virgül binlik ayracı (silinir), nokta zaten ondalık
+      normalized = s.replace(/,/g, '');
+    } else {
+      normalized = s; // ne nokta ne virgül var, olduğu gibi bırak
+    }
+    return parseFloat(normalized);
+  }
+
+  function formatQrAmount(value) {
+    if (!value) return value;
+    const n = parseFlexibleAmount(value);
+    if (isNaN(n)) return value; // beklenmedik bir biçimse olduğu gibi bırak
+    return n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function cropCanvas(canvas, region) {
+    const sx = canvas.width * region.x;
+    const sy = canvas.height * region.y;
+    const sw = canvas.width * region.w;
+    const sh = canvas.height * region.h;
+
+    const crop = document.createElement('canvas');
+    crop.width = sw;
+    crop.height = sh;
+    crop.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    return crop;
+  }
+
+  async function renderPageToCanvas(page, scale) {
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+
+    const ctx = canvas.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    await page.render({ canvasContext: ctx, viewport, intent: 'print' }).promise;
+    return canvas;
+  }
+
+
+  // --- ZXing ---
+  // NOT (önemli, sıralamayı belirliyor): önceden "ZXing daha yavaş (wasm)"
+  // varsayımıyla jsQR'ı birincil, ZXing'i ayrı/sınırlı bir son-çare fazı
+  // yapmıştık. Gerçek ölçümle (ısınmış motor, aynı görüntü, 15-20 tekrar)
+  // bu varsayım YANLIŞ çıktı: ZXing jsQR'dan tutarlı şekilde 6-9 kat DAHA
+  // HIZLI (ör. 1785x631 görüntüde jsQR ~107-173ms, ZXing ~12-21ms) — üstelik
+  // daha toleranslı da (zor okunan bazı karekod vakaları). Isınma
+  // maliyeti de ihmal edilebilir (~40ms ilk çağrı, sonra ~14ms) ve bir kez
+  // (uygulama ömrü boyunca) ödeniyor. O yüzden artık ZXing birincil, jsQR
+  // (bedavaya yakın, zaten yükte) onun bulamadığı nadir durumlar için yedek.
+  let zxingOverridesSet = false;
+  function initZxing() {
+    if (zxingOverridesSet) return;
+    if (typeof ZXING === 'undefined' || typeof window.ZXING_WASM_B64 === 'undefined') return; // dosyalar yüklenememiş, sessizce vazgeç
+    const bin = atob(window.ZXING_WASM_B64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    ZXING.setZXingModuleOverrides({ wasmBinary: bytes });
+    zxingOverridesSet = true;
+  }
+
+  async function tryZxingRegion(canvas, scanRegion) {
+    try {
+      if (typeof ZXING === 'undefined') return null;
+      initZxing();
+      const region = scanRegion || { x: 0, y: 0, width: canvas.width, height: canvas.height };
+      const imageData = canvas.getContext('2d').getImageData(region.x, region.y, region.width, region.height);
+      const results = await ZXING.readBarcodesFromImageData(imageData, { formats: ['QRCode'], tryHarder: true });
+      return results.length ? results[0].text : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Bir bölgeyi hem ZXing hem jsQR ile dener (bu sırayla — yukarıdaki not),
+  // ilk bulunanı döner. Ana tarama sweep'inin (onlarca ölçek/bölge
+  // kombinasyonu) HER adımında bu çağrılıyor; artık ikisi de hızlı olduğu
+  // için ayrı bir "son çare ZXing fazı"na gerek kalmadı — bkz. tryExtractViaQr.
+  async function tryScanRegion(canvas, scanRegion) {
+    const region = scanRegion || { x: 0, y: 0, width: canvas.width, height: canvas.height };
+    let imageData;
+    try {
+      imageData = canvas.getContext('2d').getImageData(region.x, region.y, region.width, region.height);
+    } catch (err) {
+      return null;
+    }
+
+    if (typeof ZXING !== 'undefined') {
+      try {
+        initZxing();
+        const results = await ZXING.readBarcodesFromImageData(imageData, { formats: ['QRCode'], tryHarder: true });
+        if (results.length) return results[0].text;
+      } catch (err) {
+        // ZXing hata verirse jsQR'ı denemeye devam et
+      }
+    }
+
+    try {
+      const code = jsQR(imageData.data, imageData.width, imageData.height);
+      return code ? code.data : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function parseQrPayload(rawText) {
+    // Bazı e-Fatura yazılımları QR metnine ham tab/satır sonu karakteri
+    // sızdırıyor (ör: "malhizmettoplam":"0\n\t\t\t\t"), bu da standart JSON'da
+    // geçersiz ve JSON.parse'ı patlatıyor. Önce bunları temizleyip deniyoruz.
+    const cleaned = rawText.replace(/[\r\n\t]+/g, '');
+    try {
+      return JSON.parse(cleaned);
+    } catch (e) {
+      // Yine de JSON değilse: metin içinde her yerde "anahtar":"değer"
+      // ikililerini ara (biçimden bağımsız, en toleranslı yol).
+      const obj = {};
+      const re = /"([^"]+)"\s*:\s*"([^"]*)"/g;
+      let m;
+      while ((m = re.exec(rawText)) !== null) {
+        obj[m[1]] = m[2];
+      }
+      if (Object.keys(obj).length) return obj;
+
+      // Son çare: | & veya satır ile ayrılmış key:value / key=value dene
+      rawText.split(/[\n|&]/).forEach(part => {
+        const trimmed = part.trim().replace(/^["']|["',]+$/g, '');
+        const sep = trimmed.indexOf(':') > 0 ? ':' : (trimmed.indexOf('=') > 0 ? '=' : -1);
+        if (sep === -1) return;
+        const key = trimmed.slice(0, sep).trim().replace(/^["']|["']$/g, '');
+        const value = trimmed.slice(sep + 1).trim().replace(/^["']|["',]$/g, '');
+        if (key) obj[key] = value;
+      });
+      return obj;
+    }
+  }
+
+  // --- Regex (yedek) Yolu (aynı açık pdf belgesi üzerinden) ---
+  async function tryExtractViaRegex(pdf) {
+    let fullText = "";
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      fullText += textContent.items.map(item => item.str).join(' ') + "\n";
+    }
+
+    const fields = {};
+    FIELD_COLUMNS.forEach(([id]) => { fields[id] = ''; });
+
+    const matchedRaw = {};
+
+    rules.forEach(rule => {
+      try {
+        const rx = new RegExp(rule.regex, 'i');
+        const match = fullText.match(rx);
+        if (match) {
+          matchedRaw[rule.id] = match[1]; // orijinal (boşluklu) haliyle - highlight için
+          const clean = match[1].replace(/\s+/g, ''); // temiz görüntü değeri
+          fields[rule.id] = rule.id === 'tarih' ? normalizeDate(clean) : clean;
+        } else {
+          fields[rule.id] = '';
+        }
+      } catch (e) {
+        fields[rule.id] = '';
+      }
+    });
+
+    const extraFields = extractDynamicAmountFields(fullText);
+    const isEsmm = extractEsmmFields(fullText, fields, extraFields);
+
+    return { raw: fullText, fields, matchedRaw, extraFields, docType: isEsmm ? 'ESMM' : undefined };
+  }
+
+  // e-SMM metin katmanı e-Fatura'dan tamamen farklı etiketler kullanıyor
+  // ("Belge Numarası" değil "Fatura No", "Brüt Ücret Tutarı" değil "Mal/
+  // Hizmet Toplamı" vb.) — bu yüzden sol paneldeki AYRI, kullanıcının
+  // düzenleyebildiği esmmRules kural setini kullanıyoruz (bkz. rulesTypeSelect
+  // / switchRulesType). Sadece QR bulunamayıp regex'e düşüldüğünde devreye
+  // girer (QR yolunda zaten buildEsmmQrResult aynı işi yapıyor). Gerçek
+  // örneklerle doğrulandı.
+  function extractEsmmFields(fullText, fields, extraFields) {
+    if (!/Serbest\s*Meslek\s*Makbuzu/i.test(fullText)) return false;
+
+    fields.faturaTipi = 'SERBEST MESLEK MAKBUZU';
+
+    const grabbed = {};
+    esmmRules.forEach(rule => {
+      try {
+        const rx = new RegExp(rule.regex, 'i');
+        const m = fullText.match(rx);
+        if (m) grabbed[rule.id] = m[1].replace(/\s+/g, '');
+      } catch (e) { /* geçersiz kullanıcı regex'i - bu alanı atla */ }
+    });
+
+    // "Belge Numarası" — ana e-Fatura kural seti "Fatura No" arıyor, bunu tanımıyor.
+    if (!fields.faturaNo && grabbed.faturaNo) fields.faturaNo = grabbed.faturaNo;
+
+    // Aynı sütun isimleri QR yolunda (buildEsmmQrResult) da kullanılıyor ki
+    // iki kaynaktan gelen aynı kavram tabloda aynı sütunda birleşsin.
+    Object.entries(ESMM_EXTRA_LABELS).forEach(([id, label]) => {
+      if (grabbed[id]) extraFields[label] = grabbed[id];
+    });
+
+    // Sabit sütunlara (mevcut tablo şemasıyla uyumlu) en yakın karşılıkları yaz.
+    const brut = extraFields['Brüt Ücret'];
+    const kdv = extraFields['KDV Tutarı (Serbest Meslek)'];
+    const netTahsilat = extraFields['Net Tahsilat'];
+    if (brut) fields.malHizmet = brut;
+    if (brut && kdv) {
+      const n1 = parseTurkishNumber(brut), n2 = parseTurkishNumber(kdv);
+      if (n1 !== null && n2 !== null) fields.vergiDahil = fmtNum(n1 + n2);
+    }
+    if (netTahsilat) fields.odenecek = netTahsilat;
+
+    return true;
+  }
+
+  // Metindeki TÜM "Hesaplanan ... (%oran) ... tutar" satırlarını (KDV, KDV
+  // GERCEK, Katma Değer Vergisi, KDV Tevkifat, ne kadar farklı oran/etiket
+  // varsa) tek seferde yakalar; her biri kendi başlıklı dinamik sütuna
+  // dönüşür. Oran sabit kodlanmadığı için %1'den %20'ye her orana çalışır.
+  function extractDynamicAmountFields(fullText) {
+    const extra = {};
+    // Oran grubu ("[\d.,]+") ve tutar grubu arasında zorunlu bir ayraç
+    // (kapanış parantezi + en az bir boşluk) YOKSA, tutar bulunamadığında
+    // regex geri izleme (backtracking) yaparak oranın kendi ondalık
+    // basamağını ("20,00" -> "20" + ",00") yanlışlıkla "tutar" sanıyordu —
+    // bu da bazı faturalarda (ör. sadece "(%20,00)" yazıp yanında tutar
+    // BASMAYAN özet satırları) sahte "0,00" değerine yol açıyordu. Kapanış
+    // parantezini ve araya en az bir boşluk şartını zorunlu kılınca bu
+    // sahte eşleşme artık oluşmuyor; gerçek tutar yoksa hiç eşleşmiyor.
+    const re = /(Hesaplanan[^%()\n]{0,45}?)\(\s*%\s*([\d.,]+)\s*\)\s+([\d.,]+)(?=\s*(?:TL|TRY|EUR|USD|GBP|\s|$))/gi;
+
+    for (const m of fullText.matchAll(re)) {
+      const label = normalizeKdvLabel(m[1].replace(/\s+/g, ' ').trim());
+      const rate = m[2].replace(/[.,]0+$/, ''); // "20.00" / "20,00" -> "20"
+      const amount = m[3];
+      const key = `${label} (%${rate})`;
+      if (!extra[key]) extra[key] = amount; // ayni oranin ilk eşleşmesini al
+    }
+
+    return extra;
+  }
+
+  // "Katma Değer Vergisi" ve "KDV GERCEK" gibi vendor'a özgü eş anlamlıları
+  // "KDV"ye indirger — yoksa "Hesaplanan KDV (%20)" ile "Hesaplanan Katma
+  // Değer Vergisi (%20)" ayrı sütun sanılıp gereksiz çoğalır.
+  function normalizeKdvLabel(rawLabel) {
+    return rawLabel
+      .replace(/Katma\s*De[ğg]er\s*Vergisi/gi, 'KDV')
+      .replace(/KDV\s*GERCEK/gi, 'KDV')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // --- Tablo ---
+  function renderTable() {
+    if (!rows.length) return;
+
+    document.getElementById('resultsArea').style.display = 'block';
+    document.getElementById('fileCount').textContent = rows.length;
+
+    const thead = document.getElementById('tableHeader');
+    const tbody = document.getElementById('tableBody');
+
+    const metaCols = [
+      ['__filename', 'Dosya Adı', 'text-align:left;'],
+      ['__source', 'Kaynak', ''],
+      ['__kontrol', 'Kontrol', '']
+    ];
+    const fixedCols = FIELD_COLUMNS.map(([id, label]) => [id, label, '']);
+    const dynCols = dynamicColumns.map(label => ['dyn:' + label, label, '']);
+
+    thead.innerHTML = [...metaCols, ...fixedCols, ...dynCols].map(([key, label, style]) => {
+      const arrow = sortState.key === key ? `<span class="sort-indicator">${sortState.dir > 0 ? '▲' : '▼'}</span>` : '';
+      return `<th style="${style}" onclick="sortRows('${key.replace(/'/g, "\\'")}')">${escapeHtml(label)}${arrow}</th>`;
+    }).join('');
+    tbody.innerHTML = '';
+
+    rows.forEach((row, index) => {
+      const tr = document.createElement('tr');
+      const checks = row.validationChecks || [];
+      const failedChecks = checks.filter(c => !c.ok);
+      if (failedChecks.length) tr.classList.add('row-error');
+
+      // Satıra tıklayınca aşağıdaki Ham Veri Önizleme listesinden bu dosyayı
+      // seçer VE varsa doğrulama hatalarını altta kutuda gösterir.
+      tr.addEventListener('click', () => selectRow(index));
+
+      // Çift tıklayınca PDF'in kendisini yeni sekmede açar.
+      tr.addEventListener('dblclick', () => openRowPdf(index));
+
+      const badgeClass = row.source === 'QR' ? 'badge-qr' : (row.source === 'Regex' ? 'badge-regex' : 'badge-none');
+      let tdContent = `<td style="text-align:left;"><b class="filename-cell" title="${escapeHtml(row.fileName)}">${escapeHtml(row.fileName)}</b></td>`;
+      let sourceCell = `<span class="badge ${badgeClass}">${escapeHtml(row.source)}</span>`;
+      if (row.docType === 'ESMM') {
+        sourceCell += ` <span class="badge badge-ok" title="Serbest Meslek Makbuzu — sadece muhasebeciler değil, avukatlar dahil her serbest meslek erbabının kestiği makbuz; e-Fatura'dan farklı bir belge türü, kendi doğrulama kuralları uygulanıyor (bkz. sayfa altı)">Serbest Meslek</span>`;
+      }
+      if (row.source !== 'QR') {
+        // QR otomatik bulunamadıysa kullanıcı elle bölge işaretleyip yeniden tarayabilir.
+        sourceCell += `<button class="qr-locate-btn" title="Karekodun yerini elle işaretleyip yeniden tara" onclick="event.stopPropagation(); openQrPicker(${index})">📍</button>`;
+      }
+      sourceCell += `<button class="rescan-btn" title="Bu faturayı seçtiğin yöntemle tekrar tara" onclick="event.stopPropagation(); openRescanMenu(event, ${index})">⋮</button>`;
+      tdContent += `<td>${sourceCell}</td>`;
+      tdContent += failedChecks.length
+        ? `<td><span class="badge badge-none" title="${escapeHtml(failedChecks.map(c => c.text).join(' | '))}">⚠ ${failedChecks.length}</span></td>`
+        : `<td><span class="badge badge-ok">✓</span></td>`;
+
+      FIELD_COLUMNS.forEach(([id]) => {
+        const val = row.fields[id];
+        tdContent += val
+          ? `<td>${escapeHtml(val)}</td>`
+          : `<td class="missing-data">Bulunamadı</td>`;
+      });
+
+      // Dinamik sütunlar (KDV oranları, QR'daki ek alanlar): bu satırda o
+      // alan geçerli değilse kırmızı "Bulunamadı" yerine soluk "—" — bu bir
+      // hata değil, sadece o faturada o alan yok demek (ör. farklı KDV oranı).
+      dynamicColumns.forEach(label => {
+        const val = (row.extraFields || {})[label];
+        tdContent += val
+          ? `<td>${escapeHtml(val)}</td>`
+          : `<td class="not-applicable">—</td>`;
+      });
+
+      tr.innerHTML = tdContent;
+      tbody.appendChild(tr);
+    });
+
+    renderFooterTotals();
+  }
+
+  // --- Sıralama ---
+  let sortState = { key: null, dir: 1 };
+  const SUMMABLE_FIELD_IDS = new Set(['malHizmet', 'vergiDahil', 'odenecek']);
+
+  function getSortValue(row, key) {
+    if (key === '__filename') return row.fileName;
+    if (key === '__source') return row.source;
+    if (key === '__kontrol') return (row.validationChecks || []).filter(c => !c.ok).length;
+    if (key.startsWith('dyn:')) return (row.extraFields || {})[key.slice(4)] || '';
+    return row.fields[key];
+  }
+
+  function sortRows(key) {
+    if (sortState.key === key) sortState.dir *= -1; else { sortState = { key, dir: 1 }; }
+
+    // rows ve lastFiles paralel dizilerdir (aynı index aynı dosyayı gösterir);
+    // sırayı değiştirirken ikisini BİRLİKTE taşımazsak çift tıkla PDF açma ve
+    // "Yenile" gibi index'e dayalı özellikler bozulur.
+    const paired = rows.map((row, i) => ({ row, file: lastFiles[i] }));
+    paired.sort((a, b) => {
+      const va = getSortValue(a.row, key);
+      const vb = getSortValue(b.row, key);
+      const na = typeof va === 'number' ? va : parseTurkishNumber(va);
+      const nb = typeof vb === 'number' ? vb : parseTurkishNumber(vb);
+      const cmp = (na !== null && nb !== null && !isNaN(na) && !isNaN(nb))
+        ? na - nb
+        : String(va || '').localeCompare(String(vb || ''), 'tr');
+      return cmp * sortState.dir;
+    });
+
+    rows = paired.map(p => p.row);
+    lastFiles = paired.map(p => p.file);
+
+    rebuildPdfSelect();
+    renderTable();
+  }
+
+  function renderFooterTotals() {
+    const tfoot = document.getElementById('tableFooter');
+    let html = '<td colspan="3" style="text-align:left;"><b>TOPLAM (' + rows.length + ' fatura)</b></td>';
+
+    FIELD_COLUMNS.forEach(([id]) => {
+      if (!SUMMABLE_FIELD_IDS.has(id)) { html += '<td></td>'; return; }
+      let sum = 0, any = false;
+      rows.forEach(r => { const n = parseTurkishNumber(r.fields[id]); if (n !== null) { sum += n; any = true; } });
+      html += `<td><b>${any ? fmtNum(sum) : ''}</b></td>`;
+    });
+
+    dynamicColumns.forEach(label => {
+      let sum = 0, any = false;
+      rows.forEach(r => { const n = parseTurkishNumber((r.extraFields || {})[label]); if (n !== null) { sum += n; any = true; } });
+      html += `<td><b>${any ? fmtNum(sum) : ''}</b></td>`;
+    });
+
+    tfoot.innerHTML = html;
+  }
+
+  // QR anahtarlarının okunabilir Türkçe başlıkları (yazılıma göre değişen
+  // isimler normalize edilip burada eşleştirilir; bilinmeyenler ham haliyle gösterilir)
+  const QR_LABELS = {
+    vkntckn: 'VKN/TCKN (Satıcı)',
+    avkntckn: 'VKN/TCKN (Alıcı)',
+    senaryo: 'Senaryo',
+    tip: 'Fatura Tipi',
+    tarih: 'Tarih',
+    no: 'Fatura No',
+    ettn: 'ETTN',
+    parabirimi: 'Para Birimi',
+    malhizmet: 'Mal/Hizmet Tutarı',
+    malhizmettoplam: 'Mal/Hizmet Tutarı',
+    vergidahil: 'Vergiler Dahil Toplam Tutar',
+    odenecek: 'Ödenecek Tutar'
+  };
+
+  // "(20.0)", "(20.00)", "(20)" gibi aynı oranın farklı yazımlarını TEK ortak
+  // eş biçime indirger (ör. "(%20)") — yoksa aynı oran her vendor'da ayrı bir
+  // dinamik sütun olarak çoğalır.
+  function normalizeRateSuffix(key) {
+    const m = key.match(/\(([\d.,]+)\)/);
+    if (!m) return '';
+    const rate = parseFloat(m[1].replace(',', '.'));
+    if (isNaN(rate)) return ` (${m[1]})`;
+    const rateStr = Number.isInteger(rate) ? String(rate) : String(rate).replace(/0+$/, '').replace(/\.$/, '');
+    return ` (%${rateStr})`;
+  }
+
+  function labelForQrKey(key) {
+    const norm = key.replace(/[\s_]+/g, '').toLowerCase();
+    if (QR_LABELS[norm]) return QR_LABELS[norm];
+    if (/^hesaplanankdvtevkifat/.test(norm)) return 'Hesaplanan KDV Tevkifat' + normalizeRateSuffix(key);
+    if (/^hesaplanankdv/.test(norm)) return 'Hesaplanan KDV' + normalizeRateSuffix(key);
+    if (/^kdvmatrah/.test(norm)) return 'KDV Matrahı' + normalizeRateSuffix(key);
+    // KDV dışı özel vergiler (konaklama vergisi, ÖİV, ÖTV, damga vergisi vb.)
+    // — QR'daki tam anahtar adı vendor'a göre değişebileceği için (ör.
+    // "oiv", "ozeliletisimvergisi") esnek örüntülerle yakalıyoruz. Bunlar
+    // KDV/matrah toplamlarına hiç karışmıyor (buildRateMap sadece
+    // matrah/kdv/tevkifat örüntülerini tanıyor) — sadece kendi başlıklı bir
+    // sütun olarak görünür, doğrulama formüllerini etkilemez.
+    if (/oiv|ozeliletisim/.test(norm)) return 'Özel İletişim Vergisi (ÖİV)' + normalizeRateSuffix(key);
+    if (/konaklama/.test(norm)) return 'Konaklama Vergisi' + normalizeRateSuffix(key);
+    if (/damga/.test(norm)) return 'Damga Vergisi' + normalizeRateSuffix(key);
+    if (/^otv/.test(norm)) return 'ÖTV' + normalizeRateSuffix(key);
+    // Hiç tanımadığımız bir alan (belki başka bir özel vergi türü) — en
+    // azından ham "birlesikkelime" yerine okunaklı "Birleşik Kelime" göster.
+    return humanizeQrKey(key);
+  }
+
+  // "ozelIletisimVergisi" / "ozel_iletisim_vergisi" gibi camelCase ya da alt
+  // çizgili, bilinmeyen bir QR anahtarını "Ozel Iletisim Vergisi" gibi
+  // okunaklı bir başlığa çevirir. Türkçe karakterleri KORUR (sadece
+  // ayraçları/boşlukları düzenler) — vendor zaten Türkçe karakter
+  // kullanıyorsa (ör. "özelİletişim") olduğu gibi kalır.
+  function humanizeQrKey(key) {
+    return key
+      .replace(/[_\-]+/g, ' ')
+      .replace(/([a-zçğıöşü])([A-ZÇĞİÖŞÜ])/g, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .map(w => w ? w.charAt(0).toLocaleUpperCase('tr-TR') + w.slice(1) : w)
+      .join(' ');
+  }
+
+  function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  // --- Ham Veri Önizleme ---
+  function renderValidationBox(row) {
+    const box = document.getElementById('validationBox');
+
+    if (!row) {
+      box.style.display = 'none';
+      box.innerHTML = '';
+      return;
+    }
+
+    const checks = row.validationChecks || [];
+    box.style.display = 'block';
+
+    if (!checks.length) {
+      box.innerHTML = '<div class="validation-box validation-ok">Bu faturada karşılaştırılacak yeterli tutar alanı bulunamadı (kontrol atlandı).</div>';
+      return;
+    }
+
+    const failedCount = checks.filter(c => !c.ok).length;
+    const boxClass = failedCount ? 'validation-box' : 'validation-box validation-ok';
+    const title = failedCount
+      ? `⚠ Bu faturada ${failedCount} tutarsızlık bulundu:`
+      : `✓ Yapılan ${checks.length} kontrolün hepsi başarılı:`;
+
+    box.innerHTML = `<div class="${boxClass}"><b>${title}</b><ul>` +
+      checks.map(c => `<li class="${c.ok ? 'check-ok' : 'check-fail'}">${c.ok ? '✓' : '✗'} ${escapeHtml(c.text)}</li>`).join('') +
+      '</ul></div>';
+  }
+
+  function renderInspector() {
+    const selectEl = document.getElementById('pdfSelect');
+    const previewEl = document.getElementById('rawTextPreview');
+
+    if (!rows.length || selectEl.value === "") {
+      previewEl.textContent = "Bir dosya seçildiğinde QR ham verisi ya da PDF metin katmanı burada görüntülenecektir...";
+      renderValidationBox(null);
+      return;
+    }
+
+    const row = rows[selectEl.value];
+    renderValidationBox(row);
+
+    if (row.source === 'QR' && row.parsedQr && Object.keys(row.parsedQr).length) {
+      // QR'da bulunan HER alana başlık atanır, sadece tablodaki 7 alana değil.
+      let html = '<table class="qr-fields-table"><tbody>';
+      Object.keys(row.parsedQr).forEach(key => {
+        html += `<tr><td>${escapeHtml(labelForQrKey(key))}</td><td>${escapeHtml(row.parsedQr[key])}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      previewEl.innerHTML = html;
+      return;
+    }
+
+    if (row.source === 'Regex' && row.raw) {
+      let highlighted = escapeHtml(row.raw);
+      const allMatches = { ...(row.matchedRaw || {}), ...(row.extraFields || {}) };
+      Object.values(allMatches).forEach(matchedText => {
+        if (!matchedText) return;
+        const re = new RegExp(escapeRegExp(escapeHtml(matchedText)), 'g');
+        highlighted = highlighted.replace(re, m => `<span class="highlight">${m}</span>`);
+      });
+      previewEl.innerHTML = highlighted;
+      return;
+    }
+
+    previewEl.textContent = row.raw || '(veri yok)';
+  }
+
+  // --- Dışa Aktarım ---
+  function copyToClipboard() {
+    if (!rows.length) return;
+
+    const headers = ['Dosya Adı', 'Kaynak', ...FIELD_COLUMNS.map(([, label]) => label), ...dynamicColumns].join('\t');
+    const dataRows = rows.map(row => {
+      const vals = FIELD_COLUMNS.map(([id]) => row.fields[id] || '');
+      const extraVals = dynamicColumns.map(label => (row.extraFields || {})[label] || '');
+      return [row.fileName, row.source, ...vals, ...extraVals].join('\t');
+    });
+
+    const clipboardText = [headers, ...dataRows].join('\n');
+    navigator.clipboard.writeText(clipboardText).then(() => {
+      alert('Tablo verileri panoya kopyalandı! Excel veya Google Sheets üzerine doğrudan yapıştırabilirsiniz.');
+    });
+  }
+
+  function exportToCSV() {
+    if (!rows.length) return;
+
+    let csvContent = "﻿"; // UTF-8 BOM (Türkçe karakterler Excel'de bozulmasın diye)
+    const headers = ['Dosya Adı', 'Kaynak', ...FIELD_COLUMNS.map(([, label]) => `"${label}"`), ...dynamicColumns.map(l => `"${l}"`)].join(';');
+    csvContent += headers + "\n";
+
+    rows.forEach(row => {
+      const vals = FIELD_COLUMNS.map(([id]) => `"${(row.fields[id] || '').replace(/"/g, '""')}"`);
+      const extraVals = dynamicColumns.map(label => `"${((row.extraFields || {})[label] || '').replace(/"/g, '""')}"`);
+      csvContent += [`"${row.fileName}"`, `"${row.source}"`, ...vals, ...extraVals].join(';') + "\n";
+    });
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `Fatura_Mega_Veriler_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+</script>
+</body>
+</html>
