@@ -15,6 +15,18 @@ içinde tablo çıkarmak üzere yapıldı.
 > şekilde tasarlandı (tek istisna: `pdf.js` ilk yüklemede CDN'den çekilir,
 > sonra tarayıcı önbelleğine alınır — bkz. [Sınırlamalar](#sınırlamalar)).
 
+> ⚠️ **Yasal uyarı / sorumluluk reddi:** Bu, **bağımsız bir gönüllü aracıdır**;
+> GİB veya başka bir resmi kurumla **hiçbir bağlantısı yoktur**, resmi bir
+> onayı/sertifikası yoktur. "Olduğu gibi" ([MIT lisansı](LICENSE)), **hiçbir
+> garanti vermeden** sunulur. Karekod/regex ile çıkarılan veriler ve
+> matematiksel doğrulama sonuçları **yalnızca ön kontrol ve zaman kazandırma
+> amaçlıdır** — beyanname, muhasebe kaydı veya herhangi bir mali/hukuki karar
+> için **tek başına dayanak olarak kullanılmamalıdır**. Sonuçları her zaman
+> faturanın kendisiyle ve gerekiyorsa bir mali müşavirle teyit edin. Aracın
+> kullanımından doğacak her türlü sonuçtan (yanlış/eksik okuma, hesaplama
+> farkı, mevzuat değişikliği vb.) kullanıcı kendisi sorumludur; yazar(lar)
+> hiçbir sorumluluk kabul etmez.
+
 ---
 
 ## Hızlı başlangıç
