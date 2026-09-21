@@ -2825,18 +2825,53 @@
   // bir durumda toplam tutmayacağı için kullanıcıya otomatik "şüpheli, gözle
   // kontrol et" sinyali gidiyor, kör güven oluşmuyor.
 
-  // En sağdaki (son) sütunu "satır tutarı" varsayıp toplar — gerçek örneklerle
+  // En sağdaki sütunu "satır tutarı" varsayıp toplar — gerçek örneklerle
   // doğrulandı: basit/tek kalemli faturalarda bu sütunun toplamı QR/regex'ten
   // gelen "Mal/Hizmet Tutarı" ile örtüşüyor. Kesin bir kural değil (her
   // vendor'da son sütun bu anlama gelmeyebilir) — bu yüzden "olası" bir
   // çapraz kontrol olarak sunuluyor, hata değil bilgi notu.
+  //
+  // GERÇEK 37 DOSYALIK TOPLU TESTTE İKİ FARKLI DENEME YAPILDI:
+  //  1) "Sondan başlayıp herhangi bir sayı olan ilk sütun" — BAYRAKLI GT'yi
+  //     düzeltti (Tutarı sütunu bölünmüştü) ama ELEKTRİO'yu BOZDU: o
+  //     dosyada gerçek "Tutarı" sütunu boştu (başka bir bölünme türü), sağa
+  //     doğru taramaya devam edince yanlışlıkla "KDV Tutarı" sütununa
+  //     sıçrayıp onu topladı — anlamca TAMAMEN FARKLI bir sütun.
+  //  2) Çözüm: KÖRÜ KÖRÜNE pozisyona değil, BAŞLIK ETİKETİNE bakıyoruz.
+  //     "Tutar" geçen ama "KDV/İskonto/Vergi" GEÇMEYEN en sondaki başlığı
+  //     gerçek "satır tutarı" sütunu sayıyoruz — bu, KDV Tutarı gibi anlamca
+  //     farklı bir sütuna asla sıçramaz. O sütun bir satırda boşsa (başlık
+  //     ikiye bölünmüş olabilir, ör. "Malzeme / Hizmet" + "Tutarı") SADECE
+  //     BİTİŞİĞİNDEKİ sütuna bakıyoruz (uzağa değil) — bölünmüş bir başlığın
+  //     iki parçası her zaman komşu sütunlardır.
   function sumLastColumn(table) {
+    if (!table.rows.length) return null;
+    const tryParse = raw => raw ? parseFlexibleAmount(raw.replace(/TL|TRY/gi, '').trim()) : NaN;
+
+    let targetCol = -1;
+    for (let col = table.headers.length - 1; col >= 0; col--) {
+      const h = table.headers[col] || '';
+      if (/Tutar/i.test(h) && !/KDV|İskonto|Iskonto|Vergi/i.test(h)) { targetCol = col; break; }
+    }
+
+    if (targetCol >= 0) {
+      let sum = 0, any = false;
+      table.rows.forEach(row => {
+        let n = tryParse(row[targetCol]);
+        if (isNaN(n) && targetCol > 0) n = tryParse(row[targetCol - 1]); // bölünmüş başlığın komşu yarısı
+        if (!isNaN(n)) { sum += n; any = true; }
+      });
+      if (any) return sum;
+    }
+
+    // Yedek: başlıkta net bir "Tutar" sütunu bulunamadıysa (nadiren), her
+    // satırda sondan sayısal ilk hücreyi kullan.
     let sum = 0, any = false;
     table.rows.forEach(row => {
-      const raw = row[row.length - 1];
-      if (!raw) return;
-      const n = parseFlexibleAmount(raw.replace(/TL|TRY/gi, '').trim());
-      if (!isNaN(n)) { sum += n; any = true; }
+      for (let col = row.length - 1; col >= 0; col--) {
+        const n = tryParse(row[col]);
+        if (!isNaN(n)) { sum += n; any = true; break; }
+      }
     });
     return any ? sum : null;
   }
