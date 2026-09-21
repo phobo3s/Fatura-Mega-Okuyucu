@@ -2545,52 +2545,71 @@
   function normTRUpper(s) { return s.trim().toLocaleUpperCase('tr-TR').replace(/İ/g, 'I'); }
 
   // Sayfayı canvas'a render edip (zaten QR/görsel-doğrulama için yaptığımız
-  // aynı iş), belirtilen dikey aralıkta GERÇEK dikey çizgileri arar — sayfanın
-  // vektör path'lerini ham/dönüşümsüz okumaya çalışmak (denendi, PDF'in kendi
-  // transform/CTM yığınını çözmeyi gerektiriyordu, aşırı karmaşıktı) yerine,
-  // pdf.js zaten TÜM dönüşümü kendisi halledip düz bir piksel matrisi
-  // ürettiği için, render edilmiş görüntü üzerinde piksel taraması yapmak çok
-  // daha basit VE hızlı (tek geçiş, milisaniyeler) — daha önce bunu "yavaş"
-  // sanmıştık, YANLIŞTI, iki farklı yöntemi karıştırmışız. Bir sütunun >%50'si
-  // koyu piksel ise (yatay olarak) dikey bir çizgi kabul ediyoruz. Gerçek
-  // örnekle (tevkifatlı hakediş faturası) doğrulandı: bulunan çizgilerin
-  // çoğu, metin kümelemesinin bulduğu sütun sınırlarıyla ±5 birim içinde
-  // örtüşüyor — hatta metnin YANLIŞLIKLA birleştirdiği iki sütunu (kısa
-  // "Açıklaması" ile uzun sarmalanan "Açıklamalar") ayrı olarak doğruluyor.
-  async function detectColumnLinesFromCanvas(page, yTopPdf, yBottomPdf) {
+  // aynı iş) belirtilen bölgede GERÇEK tablo çizgilerini (hem dikey/sütun hem
+  // yatay/satır) arar. Vektör path'lerini ham/dönüşümsüz okumaya çalışmak
+  // (denendi, PDF'in transform/CTM yığınını çözmeyi gerektiriyordu, aşırı
+  // karmaşıktı) yerine, pdf.js zaten TÜM dönüşümü kendisi halledip düz bir
+  // piksel matrisi ürettiği için, render edilmiş görüntü üzerinde piksel
+  // taraması çok daha basit VE hızlı (tek geçiş, milisaniyeler) — bunu
+  // "yavaş" sanmıştık, YANLIŞTI, iki farklı yöntemi karıştırmışız.
+  //
+  // SABİT eşik yerine (ör. "gray<150") GÖRELİ bir yöntem kullanıyoruz: her
+  // sütun/satırın ortalama "beyazdan sapmasını" (255 − en düşük RGB kanalı —
+  // rengi ne olursa olsun, gri/mavi/kırmızı fark etmez) hesaplayıp, bu
+  // sapması ORTALAMANIN belirgin ÜSTÜNDE olanları çizgi sayıyoruz. Gerçek
+  // örnekle bulundu: bir tablonun kenarlıkları SİYAH değil AÇIK GRİ olabiliyor
+  // (ör. 174/255 gibi) — sabit "koyu" eşiği bunu tamamen kaçırıyordu, göreli
+  // yöntem hem bunu hem muhtemelen kesikli çizgileri de (satır/sütun
+  // ortalaması yine de belirgin yükselir, gerçek "%X'i tam dolu" şartı değil)
+  // yakalıyor.
+  async function detectTableGridLines(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
     try {
       const scale = 1.8;
       const canvas = await renderPageToCanvas(page, scale);
       const viewport = page.getViewport({ scale });
-      const [xLeftPx, yTopPx] = viewport.convertToViewportPoint(page.view[0], yTopPdf);
-      const [xRightPx, yBottomPx] = viewport.convertToViewportPoint(page.view[2], yBottomPdf);
+      const [xLeftPx, yTopPx] = viewport.convertToViewportPoint(xLeftPdf, yTopPdf);
+      const [xRightPx, yBottomPx] = viewport.convertToViewportPoint(xRightPdf, yBottomPdf);
       const ctx = canvas.getContext('2d');
       const x0 = Math.max(0, Math.round(xLeftPx)), x1 = Math.min(canvas.width, Math.round(xRightPx));
       const y0 = Math.max(0, Math.round(yTopPx)), y1 = Math.min(canvas.height, Math.round(yBottomPx));
       const w = x1 - x0, h = y1 - y0;
-      if (w <= 0 || h <= 0) return [];
+      if (w <= 0 || h <= 0) return { colLines: [], rowLines: [] };
 
       const imgData = ctx.getImageData(x0, y0, w, h);
       const data = imgData.data;
-      const colDark = new Array(w).fill(0);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const idx = (y * w + x) * 4;
-          if ((data[idx] + data[idx + 1] + data[idx + 2]) / 3 < 150) colDark[x]++;
+      const deviation = idx => 255 - Math.min(data[idx], data[idx + 1], data[idx + 2]);
+
+      // axis 'v': her x-sütunu için dikey boyunca ortalama sapma (dikey çizgi arar)
+      // axis 'h': her y-satırı için yatay boyunca ortalama sapma (yatay çizgi arar)
+      const findLines = (axis) => {
+        const n = axis === 'v' ? w : h;
+        const other = axis === 'v' ? h : w;
+        const avgDev = new Array(n).fill(0);
+        for (let i = 0; i < n; i++) {
+          let sum = 0;
+          for (let j = 0; j < other; j++) {
+            const x = axis === 'v' ? i : j, y = axis === 'v' ? j : i;
+            sum += deviation((y * w + x) * 4);
+          }
+          avgDev[i] = sum / other;
         }
-      }
-      const threshold = h * 0.5;
-      const lineXsPx = [];
-      for (let x = 0; x < w; x++) if (colDark[x] > threshold) lineXsPx.push(x + x0);
+        const sorted = [...avgDev].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const max = sorted[sorted.length - 1];
+        const threshold = median + (max - median) * 0.35;
+        const cands = [];
+        for (let i = 0; i < n; i++) if (avgDev[i] > threshold && avgDev[i] > median * 1.4) cands.push(i);
+        // Bir çizginin kalınlığı birkaç piksel olabilir — bitişik olanları tek çizgiye indirgiyoruz.
+        const merged = [];
+        cands.forEach(i => { if (!merged.length || i - merged[merged.length - 1] >= 5) merged.push(i); });
+        return merged.map(i => axis === 'v'
+          ? viewport.convertToPdfPoint(i + x0, y0)[0]
+          : viewport.convertToPdfPoint(x0, i + y0)[1]);
+      };
 
-      // Bir çizginin kalınlığı birkaç piksel olabilir — bitişik olanları tek
-      // çizgiye indirgiyoruz.
-      const merged = [];
-      lineXsPx.forEach(x => { if (!merged.length || x - merged[merged.length - 1] >= 5) merged.push(x); });
-
-      return merged.map(px => viewport.convertToPdfPoint(px, y0)[0]);
+      return { colLines: findLines('v'), rowLines: findLines('h') };
     } catch (err) {
-      return []; // render/tarama başarısız olursa sessizce vazgeç, metin yöntemi zaten yedek
+      return { colLines: [], rowLines: [] }; // render/tarama başarısız olursa sessizce vazgeç, metin yöntemi zaten yedek
     }
   }
 
@@ -2617,6 +2636,18 @@
       if (!belowCandidates.length) continue;
       const row1Y = belowCandidates[0].y;
 
+      const headerBandTop = anchor.y + 25;
+
+      // ÖNCE GERÇEK ÇİZGİLERİ ARA (hem yatay hem dikey, tek canvas render'ında).
+      // GERÇEK ÖRNEKLE BULUNDU: tarama aralığının GENİŞLİĞİ kritik — çok geniş
+      // bir aralık (ör. 300 birim) tablonun ALTINDAKİ alakasız içeriği (dipnot,
+      // banka bilgisi tablosu vb.) de içine alıp göreli eşiği bozuyor, gerçek
+      // çizgilerin çoğu kayboluyor. row1Y'yi zaten bildiğimiz için makul,
+      // tabloya yakın bir alt sınır kullanıyoruz.
+      const { colLines: detectedLines, rowLines } = await detectTableGridLines(
+        page, page.view[0], page.view[2], headerBandTop, row1Y - 100
+      );
+
       // BİLİNEN SINIRLAMA — düzeltilen tuzak: "1. satır nerede başlıyor"
       // sorusunu SIRA NO sütunundaki ilk sayının y'sine bakarak buluyoruz, ama
       // gerçek örnekle bulundu: bazı vendor'larda o sayı satırın TEPESİNDE
@@ -2624,14 +2655,37 @@
       // sütun çok daha fazla satıra sarmış (7-9 satır!) ve "1" rakamı o
       // sarmalın sonuna denk geliyor. Bu durumda row1Y'ye güvenip başlık
       // bandını oraya kadar genişletmek, sarmalın BÜYÜK KISMINI yanlışlıkla
-      // "başlık" sayıp yutuyordu. Çözüm: başlık bandına, gerçek FONT
-      // YÜKSEKLİĞİNE göre ölçekli bir TAVAN koyuyoruz — gerçek başlıklar
-      // (kısa etiket kelimeleri) en fazla ~6 satıra sarar, daha fazlası
-      // kesin İÇERİK demektir. Sabit piksel yerine font yüksekliğinin katı
-      // kullanmak, farklı font boyutlu vendor'larda da doğru ölçekleniyor.
+      // "başlık" sayıp yutuyordu. EN İYİ çözüm: başlık/gövde arasındaki GERÇEK
+      // yatay çizgiyi kullanmak (varsa) — kesin ve güvenilir. Çizgi yoksa
+      // (çizgisiz tablo), gerçek FONT YÜKSEKLİĞİNE göre ölçekli bir TAVANA
+      // düşüyoruz (gerçek başlıklar en fazla ~6 satıra sarar, fazlası içerik
+      // demektir).
+      // GERÇEK ÖRNEKLE BULUNAN HATA: "y < anchor.y + 10" çok gevşekti — bir
+      // dosyada bu filtre tablonun EN ÜST kenarlık çizgisini (anchor'ın bile
+      // ÜSTÜNDE, y=585 iken anchor.y=577) "başlık/gövde ayracı" sanıp
+      // headerBandBottom'u anlamsız derecede yükseltti, sonra da yıkıcı bir
+      // regresyona yol açtı (32/75 → 7/75!). Şimdi İKİ güvenlik şartı var:
+      // (1) çizgi KESİNLİKLE anchor'ın ALTINDA olmalı (y < anchor.y, +10 payı
+      // yok), (2) çizgi, font-yüksekliği tabanlı tahminimize MAKUL bir
+      // mesafede olmalı (±8 satır yüksekliği) — tamamen alakasız bir çizgiyi
+      // (ör. tablo dış kenarlığı) böylece asla kabul etmiyoruz, sadece gerçek
+      // aday çizgileri "doğrular/hassaslaştırır".
       const lineHeight = anchor.h || 6; // .height gelmezse (nadiren) makul bir varsayılan
-      const headerBandBottom = Math.max(row1Y + 3, anchor.y - lineHeight * 6);
-      const headerBandTop = anchor.y + 25;
+      const heightBasedGuess = Math.max(row1Y + 3, anchor.y - lineHeight * 6);
+      // GERÇEK ÖRNEKLE BULUNAN İKİNCİ HATA: bir dosyada tespit edilen çizgi
+      // row1Y'ye NEREDEYSE BİTİŞİKTİ (aradaki fark <1 birim) — gerçek bir
+      // ayraç değil, muhtemelen satırın kendi metin taban çizgisiyle
+      // çakışan bir piksel yoğunluğu artışıydı. Bunu ayraç sanınca
+      // headerBandBottom row1Y'nin ÜSTÜNE çıktı, "1" rakamının kendisi
+      // header bandına karıştı, satır hiç bulunamadı. Şimdi çizginin row1Y'den
+      // EN AZ BİR SATIR YÜKSEKLİĞİ kadar yukarıda olmasını şart koşuyoruz.
+      const headerDividerLine = rowLines
+        .filter(y => y < anchor.y && y > row1Y + lineHeight && Math.abs(y - heightBasedGuess) < lineHeight * 8)
+        .sort((a, b) => b - a)[0];
+      const headerBandBottom = headerDividerLine !== undefined
+        ? headerDividerLine - 1
+        : heightBasedGuess;
+
       // ETTN zaten 'items'tan baştan ayıklandı (yukarı bkz.), burada ekstra
       // filtreye gerek yok.
       const headerItems = items.filter(it => it.y <= headerBandTop && it.y >= headerBandBottom);
@@ -2647,19 +2701,14 @@
       clusters.push(cur);
       let colStartX = clusters.map(c => c[0]);
 
-      // ÇİZGİ TABANLI İYİLEŞTİRME (gerçek örnekle doğrulandı — bkz. detectColumnLinesFromCanvas
-      // yorumu): metin kümelemesi sadece metnin BAŞLADIĞI x'i verir, tam sütun
-      // sınırı değil — ayrıca yakın iki metni (8px eşiği) YANLIŞLIKLA tek sütun
-      // sayabilir. Sayfada gerçek dikey çizgi varsa (native e-Fatura'larda sık),
-      // o çizginin TAM konumu çok daha güvenilir bir sınır. Çizgi bulunursa en
-      // yakın metin-sütununu ona "yapıştırıyoruz" (±15 birim tolerans); çizgi
-      // yoksa (çizgisiz/borderless tablo) metin tabanlı tahmin olduğu gibi kalır.
-      // GERÇEK ÖRNEKLE BULUNDU: tarama aralığının GENİŞLİĞİ kritik — çok geniş
-      // bir aralık (ör. 300 birim) tablonun ALTINDAKİ alakasız içeriği (dipnot,
-      // banka bilgisi tablosu vb.) de içine alıp "%50'si koyu" eşiğini
-      // bozuyor, gerçek çizgilerin çoğu kayboluyor. row1Y'yi zaten bildiğimiz
-      // için makul, tabloya yakın bir alt sınır kullanıyoruz.
-      const detectedLines = await detectColumnLinesFromCanvas(page, headerBandTop, row1Y - 100);
+      // ÇİZGİ TABANLI İYİLEŞTİRME (gerçek örnekle doğrulandı — bkz.
+      // detectTableGridLines yorumu): metin kümelemesi sadece metnin
+      // BAŞLADIĞI x'i verir, tam sütun sınırı değil — ayrıca yakın iki metni
+      // (8px eşiği) YANLIŞLIKLA tek sütun sayabilir. Sayfada gerçek dikey
+      // çizgi varsa (native e-Fatura'larda sık), o çizginin TAM konumu çok
+      // daha güvenilir bir sınır. Çizgi bulunursa en yakın metin-sütununu ona
+      // "yapıştırıyoruz" (±15 birim tolerans); çizgi yoksa (çizgisiz/
+      // borderless tablo) metin tabanlı tahmin olduğu gibi kalır.
       if (detectedLines.length) {
         colStartX = colStartX.map(x => {
           let nearest = detectedLines[0], bestDiff = Math.abs(detectedLines[0] - x);
@@ -2697,30 +2746,44 @@
       // ör. bir satır 3 satıra sarmışsa son satır da öyle sarmış olabilir diye
       // en cömert tahminle devam ediyoruz. Tek satırlık faturalarda (öğrenecek
       // "diğer satır" yoksa) eski sabit 40'a geri düşüyoruz.
+      // GERÇEK ÖRNEKLE BULUNDU: 1. satırın yTop'unu "1" rakamının kendi y'sine
+      // göre almak (r.y+3) BOŞLUK yaratıyordu — çünkü başlık artık (gerçek
+      // çizgiyle) çok daha DOĞRU/DAR bittiği için, "Sıra No" hariç diğer
+      // sütunlarda satırın gerçek içeriği "1" rakamından ÇOK DAHA YUKARIDA
+      // başlayabiliyor (uzun sarmalanan açıklama gibi) — o zaman header'ın
+      // bittiği yer ile "1"in y'si arasındaki içerik NE başlığa NE satıra
+      // dahil oluyor, kayboluyordu. Çözüm: 1. satır her zaman header'ın TAM
+      // bittiği yerden başlasın (aradaki her şey satırın kendisidir).
       const rowBounds = rowStarts.map((r, i) => ({
-        yTop: r.y + 3,
+        yTop: i === 0 ? headerBandBottom : r.y + 3,
         yBottom: i + 1 < rowStarts.length ? rowStarts[i + 1].y + 3 : null
       }));
       const knownHeights = rowBounds.filter(b => b.yBottom !== null).map(b => b.yTop - b.yBottom);
-      const maxRowHeight = knownHeights.length ? Math.max(...knownHeights) : 40;
-      rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - maxRowHeight; });
+      const maxRowHeight = knownHeights.length ? Math.max(...knownHeights) : null;
 
-      // GERÇEK ÖRNEKLE BULUNAN CİDDİ HATA: yükseklik tahmini (yukarısı) bazı
-      // faturalarda YETERSİZ KORUMA sağlıyor — tek satırlık, özet bloğuna çok
-      // YAKIN (ör. ~10 birim) faturalarda 40 birimlik varsayılan özet bloğunu
-      // ("Mal/Hizmet Toplam Tutarı", "Vergiler Dahil Toplam" vb.) SATIRA
-      // YUTUYORDU. Yükseklik tahminine güvenmek yerine, özet satırlarının HER
-      // ZAMAN belirli anahtar kelimelerle başladığı gerçeğinden bir TABAN
-      // (hard floor) kuruyoruz: son satır, bu anahtar kelimelerden birinin
-      // bulunduğu satırın İÇİNE ASLA taşamaz — yükseklik tahmini ne derse desin.
+      // GERÇEK ÖRNEKLE BULUNAN CİDDİ HATA (iki kez, iki farklı yönde):
+      //  1) Yükseklik tahmini bazı faturalarda YETERSİZ KORUMA sağlıyor — tek
+      //     satırlık, özet bloğuna çok YAKIN faturalarda 40 birimlik varsayılan
+      //     özet bloğunu SATIRA YUTUYORDU.
+      //  2) 1. satırın yTop'u header'ın (artık çizgiyle çok daha doğru/dar
+      //     biten) hemen altına taşınınca, AYNI 40 birimlik varsayılan bu sefer
+      //     TERSİNE çok SIĞ kaldı — çok satıra sarmış (100+ birim) bir satırın
+      //     büyük kısmını dışarıda bıraktı.
+      // Çözüm: yükseklik TAHMİNİNE hiç güvenmemek — özet satırlarının HER ZAMAN
+      // belirli anahtar kelimelerle başladığı gerçeğinden doğrudan gerçek
+      // sınırı buluyoruz (tahmin değil, ölçüm). Anahtar kelime bulunamazsa
+      // (nadiren) diğer satırların yüksekliğine, o da yoksa sabit 40'a düşüyoruz.
       const TOPLAM_ANAHTAR = /Toplam|Vergiler\s*Dahil|Ödenecek|Hesaplanan\s*KDV|Tevkifat[ıi]?\s*Tutar[ıi]?/i;
       const lastBound = rowBounds[rowBounds.length - 1];
       const summaryLine = items
         .filter(it => it.y < lastBound.yTop && TOPLAM_ANAHTAR.test(it.str))
         .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
-      if (summaryLine && summaryLine.y + 2 > lastBound.yBottom) {
+      if (summaryLine) {
         lastBound.yBottom = summaryLine.y + 2;
+      } else {
+        lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
       }
+      rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - (maxRowHeight ?? 40); });
 
       const dataRows = rowBounds.map(b => bucketRow(b.yTop, b.yBottom));
 
