@@ -2551,7 +2551,7 @@
       // tabloyla ilgisi yok, zaten ETTN QR/regex'ten geliyor. BAŞTAN ayıklıyoruz
       // (önceden sadece sütun sınırı hesabında ayıklıyorduk, metin toplarken
       // DEĞİL — bucketRow ham 'items'ı kullandığı için sızıntı devam ediyordu).
-      const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] }))
+      const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], h: it.height }))
         .filter(it => it.str.trim() !== '' && !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str));
 
       const anchor = items.find(it => { const n = normTRUpper(it.str); return n === 'SIRA' || n === 'SIRA NO'; });
@@ -2565,7 +2565,20 @@
       if (!belowCandidates.length) continue;
       const row1Y = belowCandidates[0].y;
 
-      const headerBandBottom = row1Y + 3;
+      // BİLİNEN SINIRLAMA — düzeltilen tuzak: "1. satır nerede başlıyor"
+      // sorusunu SIRA NO sütunundaki ilk sayının y'sine bakarak buluyoruz, ama
+      // gerçek örnekle bulundu: bazı vendor'larda o sayı satırın TEPESİNDE
+      // değil, satırın ÇOK ALTINDA duruyor — çünkü AÇIKLAMA gibi başka bir
+      // sütun çok daha fazla satıra sarmış (7-9 satır!) ve "1" rakamı o
+      // sarmalın sonuna denk geliyor. Bu durumda row1Y'ye güvenip başlık
+      // bandını oraya kadar genişletmek, sarmalın BÜYÜK KISMINI yanlışlıkla
+      // "başlık" sayıp yutuyordu. Çözüm: başlık bandına, gerçek FONT
+      // YÜKSEKLİĞİNE göre ölçekli bir TAVAN koyuyoruz — gerçek başlıklar
+      // (kısa etiket kelimeleri) en fazla ~6 satıra sarar, daha fazlası
+      // kesin İÇERİK demektir. Sabit piksel yerine font yüksekliğinin katı
+      // kullanmak, farklı font boyutlu vendor'larda da doğru ölçekleniyor.
+      const lineHeight = anchor.h || 6; // .height gelmezse (nadiren) makul bir varsayılan
+      const headerBandBottom = Math.max(row1Y + 3, anchor.y - lineHeight * 6);
       const headerBandTop = anchor.y + 25;
       // ETTN zaten 'items'tan baştan ayıklandı (yukarı bkz.), burada ekstra
       // filtreye gerek yok.
@@ -2615,6 +2628,23 @@
       const knownHeights = rowBounds.filter(b => b.yBottom !== null).map(b => b.yTop - b.yBottom);
       const maxRowHeight = knownHeights.length ? Math.max(...knownHeights) : 40;
       rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - maxRowHeight; });
+
+      // GERÇEK ÖRNEKLE BULUNAN CİDDİ HATA: yükseklik tahmini (yukarısı) bazı
+      // faturalarda YETERSİZ KORUMA sağlıyor — tek satırlık, özet bloğuna çok
+      // YAKIN (ör. ~10 birim) faturalarda 40 birimlik varsayılan özet bloğunu
+      // ("Mal/Hizmet Toplam Tutarı", "Vergiler Dahil Toplam" vb.) SATIRA
+      // YUTUYORDU. Yükseklik tahminine güvenmek yerine, özet satırlarının HER
+      // ZAMAN belirli anahtar kelimelerle başladığı gerçeğinden bir TABAN
+      // (hard floor) kuruyoruz: son satır, bu anahtar kelimelerden birinin
+      // bulunduğu satırın İÇİNE ASLA taşamaz — yükseklik tahmini ne derse desin.
+      const TOPLAM_ANAHTAR = /Toplam|Vergiler\s*Dahil|Ödenecek|Hesaplanan\s*KDV|Tevkifat[ıi]?\s*Tutar[ıi]?/i;
+      const lastBound = rowBounds[rowBounds.length - 1];
+      const summaryLine = items
+        .filter(it => it.y < lastBound.yTop && TOPLAM_ANAHTAR.test(it.str))
+        .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
+      if (summaryLine && summaryLine.y + 2 > lastBound.yBottom) {
+        lastBound.yBottom = summaryLine.y + 2;
+      }
 
       const dataRows = rowBounds.map(b => bucketRow(b.yTop, b.yBottom));
 
