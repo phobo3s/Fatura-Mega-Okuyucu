@@ -118,6 +118,12 @@
     #rescanMenu button:hover { background: #eff6ff; }
 
     #qrPickerModal { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65); z-index: 1000; align-items: center; justify-content: center; }
+    #lineItemModal { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65); z-index: 1000; align-items: center; justify-content: center; }
+    #lineItemModal.open { display: flex; }
+    #lineItemBody table { width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: right; }
+    #lineItemBody th, #lineItemBody td { padding: 6px 8px; border: 1px solid var(--border-color); white-space: nowrap; }
+    #lineItemBody th { background: #f8fafc; position: sticky; top: 0; }
+    #lineItemBody td:first-child, #lineItemBody th:first-child { text-align: left; white-space: normal; min-width: 180px; }
     #qrPickerModal.open { display: flex; }
     .qr-picker-dialog { background: #fff; border-radius: 10px; padding: 16px; max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 10px; }
     .qr-picker-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; font-size: 13px; }
@@ -315,6 +321,21 @@
 
 <!-- Bir satırı istenen yöntemle tekrar tarama menüsü -->
 <div id="rescanMenu"></div>
+
+<!-- Fatura Kalemleri (Sıra No tablosu) Penceresi -->
+<div id="lineItemModal">
+  <div class="qr-picker-dialog" style="width:min(1100px, 92vw); max-height:88vh;">
+    <div class="qr-picker-header">
+      <b id="lineItemTitle">📋 Fatura Kalemleri</b>
+      <button class="btn btn-sm btn-secondary" onclick="closeLineItemModal()">✕ Kapat</button>
+    </div>
+    <div id="lineItemBody" style="overflow:auto; max-height:60vh; border:1px solid var(--border-color); border-radius:6px;"></div>
+    <div class="qr-picker-footer">
+      <span id="lineItemStatus"></span>
+      <button class="btn btn-sm" id="lineItemCopyBtn" onclick="copyLineItemTableToClipboard()" disabled>📋 Panoya Kopyala</button>
+    </div>
+  </div>
+</div>
 
 <script>
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
@@ -2209,6 +2230,7 @@
         sourceCell += `<button class="qr-locate-btn" title="Karekodun yerini elle işaretleyip yeniden tara" onclick="event.stopPropagation(); openQrPicker(${index})">📍</button>`;
       }
       sourceCell += `<button class="rescan-btn" title="Bu faturayı seçtiğin yöntemle tekrar tara" onclick="event.stopPropagation(); openRescanMenu(event, ${index})">⋮</button>`;
+      sourceCell += `<button class="rescan-btn" title="Fatura kalemleri (Sıra No tablosu) — bulunursa göster ve panoya kopyala" onclick="event.stopPropagation(); openLineItemTable(${index})">📋</button>`;
       tdContent += `<td>${sourceCell}</td>`;
       tdContent += failedChecks.length
         ? `<td><span class="badge badge-none" title="${escapeHtml(failedChecks.map(c => c.text).join(' | '))}">⚠ ${failedChecks.length}</span></td>`
@@ -2471,6 +2493,215 @@
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  }
+
+  // ==========================================================================
+  // FATURA KALEMLERİ (SIRA NO TABLOSU) — sadece native e-Fatura'da işe yarar
+  // ==========================================================================
+  // Bu, faturanın QR/regex'ten çıkan ÖZET alanlarından (Mal/Hizmet Toplamı,
+  // KDV vb.) TAMAMEN AYRI bir özellik: fatura İÇİNDEKİ kalem kalem (Sıra No,
+  // Açıklama, Miktar, Birim Fiyat, Tutar...) satır tablosunu bulup panoya
+  // kopyalamayı hedefliyor. Sadece metinden okunabilen (taranmış/vektör-path
+  // OLMAYAN) native e-Fatura PDF'lerinde çalışır — bkz. docs/qr-semalari.md
+  // ve CLAUDE.md'deki "taranmış PDF" sınırlaması, burada da aynen geçerli.
+  //
+  // NASIL ÇALIŞIYOR: Power Query'nin Pdf.Tables() otomatik tablo algılamasını
+  // gerçek 75 faturalık örneklemde test ettik — dosyaların YARISINDAN
+  // FAZLASINDA hiçbir tablo bulamadı (kara kutu, açıklanamaz). Vektör çizim
+  // verisinden (constructPath argümanları) tablo çizgilerini okumayı da
+  // denedik — koordinatlar PDF'in kendi dönüşüm (CTM) yığınında ham/ölçeksiz
+  // geliyor, doğru sayfa koordinatına çevirmek küçük bir PDF render motoru
+  // yazmak gibi bir işe dönüşüyordu. Bu yüzden pdf.js'in zaten okuduğu METİN
+  // KONUMLARINI (x/y) kullanan bir kümeleme yaklaşımına karar verdik:
+  //   1) "Sıra" ya da "Sıra No" yazan bir metin parçası ara (tablo çapası).
+  //   2) O çapaya YAKIN x'te, İÇERİĞE göre (sabit piksel bandı DEĞİL) ilk saf
+  //      sayıyı (1, 2, 3...) bul — bu, 1. veri satırının başlangıcı. Sabit
+  //      bant kullanmak POLİMEK gibi kısa başlıklı faturalarda 1. satırı
+  //      başlık bandına yanlışlıkla dahil edip kayboluyordu (gerçek dosyayla
+  //      bulundu, düzeltildi).
+  //   3) Başlık bandı = çapa ile 1. satır arasındaki her şey. Bu banttaki
+  //      metinlerin x-konumlarını kümeleyip (8px toleransla) sütun sınırlarını
+  //      çıkar.
+  //   4) 1. sütunun x-aralığında, saf sayı olan her metin parçası yeni bir
+  //      satırın başlangıcıdır (bir sonraki satır başlayana kadar). Her
+  //      satırın y-aralığındaki tüm metinleri sütun x-aralığına göre kovalara
+  //      dağıt, birleştir.
+  // Gerçek 75 dosyalık örneklemde 32/75 (%43 ham) başarılı — ama ham oran
+  // yanıltıcı: 38 dosyada (%51) HİÇ metin katmanı yok (taranmış/vektör-path,
+  // OCR gerektirir — bu fonksiyonun hiçbir versiyonu bunu çözemez), yani
+  // gerçek payda 37. O 37 içinde başarı oranı 32/37 (~%86). Kalan 5'i tek
+  // tek incelendi: 1'i düzeltildi (yazım toleransı, aşağıya bkz.), 1'i bozuk
+  // font kodlaması (çözülemez), 2'si telekom faturası (Sıra No kavramı hiç
+  // yok, "GSM Hat Detayları" farklı bir yapı), 1'i iki dilli başlıklı bir
+  // fatura (Sıra No sütunu hiç yok). Yani kalan boşluk büyük ölçüde "bu
+  // yöntemle çözülemez" kategorisinde, "satır keşfi kırık" değil.
+  // Türkçe büyütme kuralı noktalı/noktasız "i" ayrımını KORUYOR: düz "i" -> "İ"
+  // (noktalı), "ı" -> "I" (noktasız). Bazı vendor'lar "Sıra" yerine YANLIŞLIKLA
+  // "Sira" (düz i ile) yazıyor (gerçek örnekle bulundu: VENDOR-M) — bu da
+  // büyütülünce "SİRA" (noktalı İ) oluyor, "SIRA" (noktasız I) ile eşleşmiyor.
+  // İ'yi I'ya çevirerek bu yazım farkını tolere ediyoruz.
+  function normTRUpper(s) { return s.trim().toLocaleUpperCase('tr-TR').replace(/İ/g, 'I'); }
+
+  async function detectLineItemTable(pdf) {
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+      const page = await pdf.getPage(pageNo);
+      const tc = await page.getTextContent();
+      const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] })).filter(it => it.str.trim() !== '');
+
+      const anchor = items.find(it => { const n = normTRUpper(it.str); return n === 'SIRA' || n === 'SIRA NO'; });
+      if (!anchor) continue;
+
+      // 1. veri satırını İÇERİĞE göre bul (bkz. yukarıdaki yorum, madde 2).
+      const belowCandidates = items
+        .filter(it => it.y <= anchor.y + 5 && it.x >= anchor.x - 6 && it.x <= anchor.x + 40)
+        .filter(it => /^\d{1,4}$/.test(it.str.trim()))
+        .sort((a, b) => b.y - a.y);
+      if (!belowCandidates.length) continue;
+      const row1Y = belowCandidates[0].y;
+
+      const headerBandBottom = row1Y + 3;
+      const headerBandTop = anchor.y + 25;
+      // ETTN etiketi (ve UUID'si) bazı vendor'larda tam bu bandın içine,
+      // "Sıra" ile aynı x'e düşüyor (ör. VENDOR-O) — başlığa karışmasın diye
+      // ayıklıyoruz; asıl tabloyla ilgisi yok, zaten ETTN QR/regex'ten geliyor.
+      const headerItems = items.filter(it =>
+        it.y <= headerBandTop && it.y >= headerBandBottom &&
+        !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str)
+      );
+      const sortedHx = [...new Set(headerItems.map(it => Math.round(it.x)))].sort((a, b) => a - b);
+      if (!sortedHx.length) continue;
+
+      const clusters = [];
+      let cur = [sortedHx[0]];
+      for (let i = 1; i < sortedHx.length; i++) {
+        if (sortedHx[i] - cur[cur.length - 1] < 8) cur.push(sortedHx[i]);
+        else { clusters.push(cur); cur = [sortedHx[i]]; }
+      }
+      clusters.push(cur);
+      const colStartX = clusters.map(c => c[0]);
+
+      // Bir y-aralığındaki metinleri sütun x-aralıklarına göre kovalayıp birleştirir.
+      // Header bandı ve her veri satırı için AYNI mantık kullanılıyor.
+      const bucketRow = (yTop, yBottom) => {
+        const bandItems = items.filter(it => it.y <= yTop && it.y > yBottom);
+        return colStartX.map((x0, idx) => {
+          const x1 = colStartX[idx + 1] ?? Infinity;
+          const cellItems = bandItems.filter(it => it.x >= x0 - 4 && it.x < x1 - 4).sort((a, b) => b.y - a.y || a.x - b.x);
+          return cellItems.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
+        });
+      };
+
+      const headers = bucketRow(headerBandTop, headerBandBottom);
+
+      const firstColX = colStartX[0];
+      const nextColX = colStartX[1] ?? (firstColX + 9999);
+      const rowStarts = items
+        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 4 && it.x < nextColX)
+        .filter(it => /^\d{1,4}$/.test(it.str.trim()))
+        .sort((a, b) => b.y - a.y);
+      if (!rowStarts.length) continue;
+
+      // Son satırın "bir sonrakisi" yok, o yüzden yüksekliğini DİĞER satırların
+      // GÖZLEMLENEN EN YÜKSEĞİNİ alarak tahmin ediyoruz (sabit -40 yerine) —
+      // ör. bir satır 3 satıra sarmışsa son satır da öyle sarmış olabilir diye
+      // en cömert tahminle devam ediyoruz. Tek satırlık faturalarda (öğrenecek
+      // "diğer satır" yoksa) eski sabit 40'a geri düşüyoruz.
+      const rowBounds = rowStarts.map((r, i) => ({
+        yTop: r.y + 3,
+        yBottom: i + 1 < rowStarts.length ? rowStarts[i + 1].y + 3 : null
+      }));
+      const knownHeights = rowBounds.filter(b => b.yBottom !== null).map(b => b.yTop - b.yBottom);
+      const maxRowHeight = knownHeights.length ? Math.max(...knownHeights) : 40;
+      rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - maxRowHeight; });
+
+      const dataRows = rowBounds.map(b => bucketRow(b.yTop, b.yBottom));
+
+      return { pageNo, headers, rows: dataRows };
+    }
+    return null;
+  }
+
+  // En sağdaki (son) sütunu "satır tutarı" varsayıp toplar — gerçek örneklerle
+  // (VENDOR-O, VENDOR-D/Malife) doğrulandı: bu sütunun toplamı QR/regex'ten
+  // gelen "Mal/Hizmet Tutarı" ile örtüşüyor. Kesin bir kural değil (her
+  // vendor'da son sütun bu anlama gelmeyebilir) — bu yüzden "olası" bir
+  // çapraz kontrol olarak sunuluyor, hata değil bilgi notu.
+  function sumLastColumn(table) {
+    let sum = 0, any = false;
+    table.rows.forEach(row => {
+      const raw = row[row.length - 1];
+      if (!raw) return;
+      const n = parseFlexibleAmount(raw.replace(/TL|TRY/gi, '').trim());
+      if (!isNaN(n)) { sum += n; any = true; }
+    });
+    return any ? sum : null;
+  }
+
+  let currentLineItemTable = null; // panoya kopyalama için son çıkarılan tablo
+
+  async function openLineItemTable(index) {
+    const file = lastFiles[index];
+    const row = rows[index];
+    if (!file) return;
+
+    document.getElementById('lineItemModal').classList.add('open');
+    document.getElementById('lineItemTitle').textContent = `📋 Fatura Kalemleri — ${file.name}`;
+    document.getElementById('lineItemBody').innerHTML = '<p style="padding:16px; color:var(--text-muted);">Aranıyor...</p>';
+    document.getElementById('lineItemStatus').textContent = '';
+    document.getElementById('lineItemCopyBtn').disabled = true;
+    currentLineItemTable = null;
+
+    let pdf = null;
+    try {
+      const buf = await file.arrayBuffer();
+      pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const table = await detectLineItemTable(pdf);
+
+      if (!table) {
+        document.getElementById('lineItemBody').innerHTML =
+          '<p style="padding:16px; color:var(--text-muted);">Kalem tablosu bulunamadı. Bu genelde faturanın taranmış/vektör-çizim tabanlı olduğu (metin katmanı yok ya da "Sıra"/"Sıra No" başlığı farklı yazılmış) anlamına gelir.</p>';
+        return;
+      }
+
+      currentLineItemTable = { fileName: file.name, ...table };
+
+      let html = '<table><thead><tr>' + table.headers.map(h => `<th>${escapeHtml(h || '—')}</th>`).join('') + '</tr></thead><tbody>';
+      table.rows.forEach(r => {
+        html += '<tr>' + r.map(c => `<td>${escapeHtml(c || '')}</td>`).join('') + '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('lineItemBody').innerHTML = html;
+      document.getElementById('lineItemCopyBtn').disabled = false;
+
+      // Olası çapraz kontrol: son sütun toplamı ile Mal/Hizmet Tutarı örtüşüyor mu?
+      const lastColSum = sumLastColumn(table);
+      const malHizmet = row ? parseTurkishNumber(row.fields.malHizmet) : null;
+      if (lastColSum !== null && malHizmet !== null) {
+        const ok = Math.abs(lastColSum - malHizmet) <= VALIDATION_EPS;
+        document.getElementById('lineItemStatus').innerHTML = ok
+          ? `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) ile örtüşüyor.</span>`
+          : `<span style="color:var(--danger);">⚠ Son sütun toplamı (${fmtNum(lastColSum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) — fark: ${fmtNum(malHizmet - lastColSum)}. Son sütun bu vendor'da "satır tutarı" olmayabilir, ya da tablo yanlış çıkarılmış olabilir.</span>`;
+      } else if (lastColSum !== null) {
+        document.getElementById('lineItemStatus').textContent = `Son sütun toplamı: ${fmtNum(lastColSum)} (karşılaştırılacak Mal/Hizmet Tutarı bulunamadı)`;
+      }
+    } catch (err) {
+      console.error(err);
+      document.getElementById('lineItemBody').innerHTML = `<p style="padding:16px; color:var(--danger);">Hata: ${escapeHtml(err.message || String(err))}</p>`;
+    } finally {
+      if (pdf) pdf.destroy();
+    }
+  }
+
+  function closeLineItemModal() {
+    document.getElementById('lineItemModal').classList.remove('open');
+  }
+
+  function copyLineItemTableToClipboard() {
+    if (!currentLineItemTable) return;
+    const lines = [currentLineItemTable.headers.join('\t'), ...currentLineItemTable.rows.map(r => r.join('\t'))];
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      document.getElementById('lineItemStatus').textContent = '✓ Panoya kopyalandı — Excel/Sheets üzerine yapıştırabilirsiniz.';
+    });
   }
 </script>
 </body>
