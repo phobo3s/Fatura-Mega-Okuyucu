@@ -2546,7 +2546,13 @@
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
       const page = await pdf.getPage(pageNo);
       const tc = await page.getTextContent();
-      const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] })).filter(it => it.str.trim() !== '');
+      // ETTN etiketi (ve UUID'si) bazı vendor'larda tam "Sıra" ile aynı x'e
+      // düşüp başlık/satır metnine karışıyor (gerçek örnekle bulundu) — asıl
+      // tabloyla ilgisi yok, zaten ETTN QR/regex'ten geliyor. BAŞTAN ayıklıyoruz
+      // (önceden sadece sütun sınırı hesabında ayıklıyorduk, metin toplarken
+      // DEĞİL — bucketRow ham 'items'ı kullandığı için sızıntı devam ediyordu).
+      const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] }))
+        .filter(it => it.str.trim() !== '' && !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str));
 
       const anchor = items.find(it => { const n = normTRUpper(it.str); return n === 'SIRA' || n === 'SIRA NO'; });
       if (!anchor) continue;
@@ -2561,13 +2567,9 @@
 
       const headerBandBottom = row1Y + 3;
       const headerBandTop = anchor.y + 25;
-      // ETTN etiketi (ve UUID'si) bazı vendor'larda tam bu bandın içine,
-      // "Sıra" ile aynı x'e düşüyor (ör. VENDOR-O) — başlığa karışmasın diye
-      // ayıklıyoruz; asıl tabloyla ilgisi yok, zaten ETTN QR/regex'ten geliyor.
-      const headerItems = items.filter(it =>
-        it.y <= headerBandTop && it.y >= headerBandBottom &&
-        !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str)
-      );
+      // ETTN zaten 'items'tan baştan ayıklandı (yukarı bkz.), burada ekstra
+      // filtreye gerek yok.
+      const headerItems = items.filter(it => it.y <= headerBandTop && it.y >= headerBandBottom);
       const sortedHx = [...new Set(headerItems.map(it => Math.round(it.x)))].sort((a, b) => a - b);
       if (!sortedHx.length) continue;
 
