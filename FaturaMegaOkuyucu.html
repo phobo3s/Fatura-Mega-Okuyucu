@@ -2621,8 +2621,23 @@
     return null;
   }
 
+  // BİLİNEN SINIRLAMA — satır içine GÖMÜLÜ ikinci bir tablo: gerçek bir
+  // örnekle (tıbbi cihaz faturası) bulundu — düzenleme gereği her ürün
+  // satırının altına "Lot-Seri Numaraları / Adet / Miad / Üretim Tarihi /
+  // UTS No" gibi kendi sütun düzenine sahip AYRI bir mini-tablo ekleniyor.
+  // Bu algoritma "bir satırın y-aralığındaki her metin ana tablonun
+  // sütunlarından birine aittir" varsayımına dayanıyor — aynı y-bandında
+  // İKİNCİ bir sütun şeması olunca (alt-tablonun "Adet/" değeri ana
+  // tablonun "Referans" sütununa karışması gibi) hücreler yanlış eşleşiyor.
+  // Bilerek DÜZELTİLMEDİ: bu deseni tanıyacak bir filtre (ör. "Lot-Seri
+  // Numaraları" anahtar kelimesini ayıklamak) tek bir vendor/sektör için işe
+  // yarar ama genele risk katar (başka faturalarda yanlış pozitif). Bunun
+  // yerine aşağıdaki sumLastColumn() çapraz kontrolüne güveniyoruz — böyle
+  // bir durumda toplam tutmayacağı için kullanıcıya otomatik "şüpheli, gözle
+  // kontrol et" sinyali gidiyor, kör güven oluşmuyor.
+
   // En sağdaki (son) sütunu "satır tutarı" varsayıp toplar — gerçek örneklerle
-  // (VENDOR-O, VENDOR-D/Malife) doğrulandı: bu sütunun toplamı QR/regex'ten
+  // doğrulandı: basit/tek kalemli faturalarda bu sütunun toplamı QR/regex'ten
   // gelen "Mal/Hizmet Tutarı" ile örtüşüyor. Kesin bir kural değil (her
   // vendor'da son sütun bu anlama gelmeyebilir) — bu yüzden "olası" bir
   // çapraz kontrol olarak sunuluyor, hata değil bilgi notu.
