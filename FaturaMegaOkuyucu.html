@@ -2544,6 +2544,56 @@
   // İ'yi I'ya çevirerek bu yazım farkını tolere ediyoruz.
   function normTRUpper(s) { return s.trim().toLocaleUpperCase('tr-TR').replace(/İ/g, 'I'); }
 
+  // Sayfayı canvas'a render edip (zaten QR/görsel-doğrulama için yaptığımız
+  // aynı iş), belirtilen dikey aralıkta GERÇEK dikey çizgileri arar — sayfanın
+  // vektör path'lerini ham/dönüşümsüz okumaya çalışmak (denendi, PDF'in kendi
+  // transform/CTM yığınını çözmeyi gerektiriyordu, aşırı karmaşıktı) yerine,
+  // pdf.js zaten TÜM dönüşümü kendisi halledip düz bir piksel matrisi
+  // ürettiği için, render edilmiş görüntü üzerinde piksel taraması yapmak çok
+  // daha basit VE hızlı (tek geçiş, milisaniyeler) — daha önce bunu "yavaş"
+  // sanmıştık, YANLIŞTI, iki farklı yöntemi karıştırmışız. Bir sütunun >%50'si
+  // koyu piksel ise (yatay olarak) dikey bir çizgi kabul ediyoruz. Gerçek
+  // örnekle (tevkifatlı hakediş faturası) doğrulandı: bulunan çizgilerin
+  // çoğu, metin kümelemesinin bulduğu sütun sınırlarıyla ±5 birim içinde
+  // örtüşüyor — hatta metnin YANLIŞLIKLA birleştirdiği iki sütunu (kısa
+  // "Açıklaması" ile uzun sarmalanan "Açıklamalar") ayrı olarak doğruluyor.
+  async function detectColumnLinesFromCanvas(page, yTopPdf, yBottomPdf) {
+    try {
+      const scale = 1.8;
+      const canvas = await renderPageToCanvas(page, scale);
+      const viewport = page.getViewport({ scale });
+      const [xLeftPx, yTopPx] = viewport.convertToViewportPoint(page.view[0], yTopPdf);
+      const [xRightPx, yBottomPx] = viewport.convertToViewportPoint(page.view[2], yBottomPdf);
+      const ctx = canvas.getContext('2d');
+      const x0 = Math.max(0, Math.round(xLeftPx)), x1 = Math.min(canvas.width, Math.round(xRightPx));
+      const y0 = Math.max(0, Math.round(yTopPx)), y1 = Math.min(canvas.height, Math.round(yBottomPx));
+      const w = x1 - x0, h = y1 - y0;
+      if (w <= 0 || h <= 0) return [];
+
+      const imgData = ctx.getImageData(x0, y0, w, h);
+      const data = imgData.data;
+      const colDark = new Array(w).fill(0);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const idx = (y * w + x) * 4;
+          if ((data[idx] + data[idx + 1] + data[idx + 2]) / 3 < 150) colDark[x]++;
+        }
+      }
+      const threshold = h * 0.5;
+      const lineXsPx = [];
+      for (let x = 0; x < w; x++) if (colDark[x] > threshold) lineXsPx.push(x + x0);
+
+      // Bir çizginin kalınlığı birkaç piksel olabilir — bitişik olanları tek
+      // çizgiye indirgiyoruz.
+      const merged = [];
+      lineXsPx.forEach(x => { if (!merged.length || x - merged[merged.length - 1] >= 5) merged.push(x); });
+
+      return merged.map(px => viewport.convertToPdfPoint(px, y0)[0]);
+    } catch (err) {
+      return []; // render/tarama başarısız olursa sessizce vazgeç, metin yöntemi zaten yedek
+    }
+  }
+
   async function detectLineItemTable(pdf) {
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
       const page = await pdf.getPage(pageNo);
@@ -2595,7 +2645,31 @@
         else { clusters.push(cur); cur = [sortedHx[i]]; }
       }
       clusters.push(cur);
-      const colStartX = clusters.map(c => c[0]);
+      let colStartX = clusters.map(c => c[0]);
+
+      // ÇİZGİ TABANLI İYİLEŞTİRME (gerçek örnekle doğrulandı — bkz. detectColumnLinesFromCanvas
+      // yorumu): metin kümelemesi sadece metnin BAŞLADIĞI x'i verir, tam sütun
+      // sınırı değil — ayrıca yakın iki metni (8px eşiği) YANLIŞLIKLA tek sütun
+      // sayabilir. Sayfada gerçek dikey çizgi varsa (native e-Fatura'larda sık),
+      // o çizginin TAM konumu çok daha güvenilir bir sınır. Çizgi bulunursa en
+      // yakın metin-sütununu ona "yapıştırıyoruz" (±15 birim tolerans); çizgi
+      // yoksa (çizgisiz/borderless tablo) metin tabanlı tahmin olduğu gibi kalır.
+      // GERÇEK ÖRNEKLE BULUNDU: tarama aralığının GENİŞLİĞİ kritik — çok geniş
+      // bir aralık (ör. 300 birim) tablonun ALTINDAKİ alakasız içeriği (dipnot,
+      // banka bilgisi tablosu vb.) de içine alıp "%50'si koyu" eşiğini
+      // bozuyor, gerçek çizgilerin çoğu kayboluyor. row1Y'yi zaten bildiğimiz
+      // için makul, tabloya yakın bir alt sınır kullanıyoruz.
+      const detectedLines = await detectColumnLinesFromCanvas(page, headerBandTop, row1Y - 100);
+      if (detectedLines.length) {
+        colStartX = colStartX.map(x => {
+          let nearest = detectedLines[0], bestDiff = Math.abs(detectedLines[0] - x);
+          for (const lx of detectedLines) {
+            const diff = Math.abs(lx - x);
+            if (diff < bestDiff) { nearest = lx; bestDiff = diff; }
+          }
+          return bestDiff <= 15 ? Math.round(nearest) : x;
+        });
+      }
 
       // Bir y-aralığındaki metinleri sütun x-aralıklarına göre kovalayıp birleştirir.
       // Header bandı ve her veri satırı için AYNI mantık kullanılıyor.
