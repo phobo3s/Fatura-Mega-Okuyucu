@@ -330,8 +330,10 @@
       <button class="btn btn-sm btn-secondary" onclick="closeLineItemModal()">✕ Kapat</button>
     </div>
     <div id="lineItemBody" style="overflow:auto; max-height:60vh; border:1px solid var(--border-color); border-radius:6px;"></div>
+    <div id="lineItemVisualWrap" style="display:none; overflow:auto; max-height:60vh; border:1px solid var(--border-color); border-radius:6px; text-align:center; background:#f1f5f9;"></div>
     <div class="qr-picker-footer">
       <span id="lineItemStatus"></span>
+      <button class="btn btn-sm btn-secondary" id="lineItemVisualBtn" onclick="toggleLineItemVisual()" disabled>👁 Görsel Doğrulama</button>
       <button class="btn btn-sm" id="lineItemCopyBtn" onclick="copyLineItemTableToClipboard()" disabled>📋 Panoya Kopyala</button>
     </div>
   </div>
@@ -2648,7 +2650,13 @@
 
       const dataRows = rowBounds.map(b => bucketRow(b.yTop, b.yBottom));
 
-      return { pageNo, headers, rows: dataRows };
+      // 'debug' alanı: sadece görsel doğrulama (👁 butonu) için — sütun/satır
+      // sınırlarını render edilmiş sayfanın üzerine çizebilmek için gerekli
+      // ham koordinatlar. Tabloyu OKUMAK için gerekli değil, sadece GÖRMEK için.
+      return {
+        pageNo, headers, rows: dataRows,
+        debug: { colStartX, headerBandTop, headerBandBottom, rowBounds }
+      };
     }
     return null;
   }
@@ -2694,8 +2702,13 @@
     document.getElementById('lineItemModal').classList.add('open');
     document.getElementById('lineItemTitle').textContent = `📋 Fatura Kalemleri — ${file.name}`;
     document.getElementById('lineItemBody').innerHTML = '<p style="padding:16px; color:var(--text-muted);">Aranıyor...</p>';
+    document.getElementById('lineItemBody').style.display = '';
+    document.getElementById('lineItemVisualWrap').style.display = 'none';
+    document.getElementById('lineItemVisualWrap').innerHTML = '';
+    document.getElementById('lineItemVisualBtn').textContent = '👁 Görsel Doğrulama';
     document.getElementById('lineItemStatus').textContent = '';
     document.getElementById('lineItemCopyBtn').disabled = true;
+    document.getElementById('lineItemVisualBtn').disabled = true;
     currentLineItemTable = null;
 
     let pdf = null;
@@ -2710,7 +2723,8 @@
         return;
       }
 
-      currentLineItemTable = { fileName: file.name, ...table };
+      currentLineItemTable = { fileName: file.name, file, ...table };
+      document.getElementById('lineItemVisualBtn').disabled = false;
 
       let html = '<table><thead><tr>' + table.headers.map(h => `<th>${escapeHtml(h || '—')}</th>`).join('') + '</tr></thead><tbody>';
       table.rows.forEach(r => {
@@ -2741,6 +2755,86 @@
 
   function closeLineItemModal() {
     document.getElementById('lineItemModal').classList.remove('open');
+  }
+
+  // Görsel doğrulama ("boncuk"): tespit edilen sütun sınırlarını (mavi dikey
+  // çizgiler), başlık bandını (turuncu) ve her satırın algılanan sınırlarını
+  // (yeşil, açık/koyu dönüşümlü) render edilmiş sayfanın ÜZERİNE çizer — bu
+  // sayede algoritmanın ne "gördüğünü" gözle kontrol edebiliyoruz, JSON'a
+  // bakıp tahmin yürütmek yerine. Sadece inceleme amaçlı, tabloyu okumak için
+  // gerekli değil.
+  async function toggleLineItemVisual() {
+    const wrap = document.getElementById('lineItemVisualWrap');
+    const body = document.getElementById('lineItemBody');
+    const btn = document.getElementById('lineItemVisualBtn');
+
+    if (wrap.style.display !== 'none') {
+      wrap.style.display = 'none';
+      body.style.display = '';
+      btn.textContent = '👁 Görsel Doğrulama';
+      return;
+    }
+    if (!currentLineItemTable) return;
+
+    btn.disabled = true;
+    body.style.display = 'none';
+    wrap.style.display = '';
+    wrap.innerHTML = '<p style="padding:16px; color:var(--text-muted);">Render ediliyor...</p>';
+    btn.textContent = '📋 Tabloya Dön';
+
+    let pdf = null;
+    try {
+      const buf = await currentLineItemTable.file.arrayBuffer();
+      pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const page = await pdf.getPage(currentLineItemTable.pageNo);
+      const scale = 1.8;
+      const canvas = await renderPageToCanvas(page, scale);
+      const viewport = page.getViewport({ scale });
+      const ctx = canvas.getContext('2d');
+
+      const { colStartX, headerBandTop, headerBandBottom, rowBounds } = currentLineItemTable.debug;
+      const pageLeft = page.view[0];
+      const pageRight = page.view[2];
+      const lastYBottom = rowBounds.length ? rowBounds[rowBounds.length - 1].yBottom : headerBandBottom;
+
+      const drawBand = (yTop, yBottom, fillColor) => {
+        const [x0, vTop] = viewport.convertToViewportPoint(pageLeft, yTop);
+        const [x1, vBottom] = viewport.convertToViewportPoint(pageRight, yBottom);
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(x0, vTop, x1 - x0, vBottom - vTop);
+        ctx.strokeStyle = 'rgba(15,23,42,0.35)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x0, vTop, x1 - x0, vBottom - vTop);
+      };
+
+      drawBand(headerBandTop, headerBandBottom, 'rgba(245,158,11,0.22)'); // 🟧 başlık
+      rowBounds.forEach((b, i) => {
+        drawBand(b.yTop, b.yBottom, i % 2 === 0 ? 'rgba(16,185,129,0.14)' : 'rgba(16,185,129,0.28)'); // 🟩 satırlar
+      });
+
+      // Sütun sınırları (dikey mavi çizgiler)
+      ctx.strokeStyle = 'rgba(37,99,235,0.9)';
+      ctx.lineWidth = 2;
+      colStartX.forEach(x => {
+        const [vx, vTop] = viewport.convertToViewportPoint(x, headerBandTop);
+        const [, vBottom] = viewport.convertToViewportPoint(x, lastYBottom);
+        ctx.beginPath();
+        ctx.moveTo(vx, vTop);
+        ctx.lineTo(vx, vBottom);
+        ctx.stroke();
+      });
+
+      pdf.destroy();
+      canvas.style.maxWidth = '100%';
+      wrap.innerHTML = '<p style="font-size:11px; color:var(--text-muted); padding:6px; margin:0;">🟧 Başlık bandı &nbsp;·&nbsp; 🟩 Tespit edilen satırlar &nbsp;·&nbsp; 🔵 Sütun sınırları</p>';
+      wrap.appendChild(canvas);
+    } catch (err) {
+      console.error(err);
+      wrap.innerHTML = `<p style="padding:16px; color:var(--danger);">Hata: ${escapeHtml(err.message || String(err))}</p>`;
+      if (pdf) pdf.destroy();
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   function copyLineItemTableToClipboard() {
