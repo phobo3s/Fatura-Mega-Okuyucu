@@ -2692,6 +2692,18 @@
       const sortedHx = [...new Set(headerItems.map(it => Math.round(it.x)))].sort((a, b) => a - b);
       if (!sortedHx.length) continue;
 
+      // DENENDİ, GERİ ALINDI: gövde satırının kendi x'lerini de kümelemeye
+      // katmak (başlık kelimesi girintiliyken gövde daha erken başlıyorsa
+      // ayrı sütun sanıp doğru ayırıyordu — ör. VENDOR-F'de "Sıra No" ile
+      // açıklama artık ayrı çıkıyordu) — ama gerçek 75 dosyalık örneklemde
+      // NET KAYIPTI: ortalama sütun sayısını (muhtemelen ~9'dan) 14.7'ye
+      // şişirdi VE daha önce TAM DOĞRU olan VENDOR-A'u bile bozdu (12 sütun ->
+      // 13, "Açıklamalar" ile "Miktar" arasına sahte boş sütun girdi). Her
+      // satırın kendi sayısal/metin hücrelerinin x'i header'dan biraz farklı
+      // olabiliyor, bu da çoğu dosyada yeni sahte sütunlar üretiyor —
+      // tek dosyalık kazanç, genelde kayıp. "Sıra No + açıklama birleşmesi"
+      // (veri kaybı yok, sadece kozmetik) bilinen bir sınırlama olarak kalıyor.
+
       const clusters = [];
       let cur = [sortedHx[0]];
       for (let i = 1; i < sortedHx.length; i++) {
