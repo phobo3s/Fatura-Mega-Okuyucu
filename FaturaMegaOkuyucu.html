@@ -2599,26 +2599,61 @@
       const data = imgData.data;
       const deviation = idx => 255 - Math.min(data[idx], data[idx + 1], data[idx + 2]);
 
-      // axis 'v': her x-sütunu için dikey boyunca ortalama sapma (dikey çizgi arar)
-      // axis 'h': her y-satırı için yatay boyunca ortalama sapma (yatay çizgi arar)
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-E): eski yöntem her satır/sütunun
+      // ORTALAMA koyuluğuna bakıyordu — ama yoğun dolu bir satırda farklı
+      // sütunlardaki kelimeler AYNI y'ye denk gelince (her satırda doğal
+      // olarak olur, çünkü bir satırın tüm hücreleri aynı yükseklikte
+      // basılır) ortalama yanıltıcı şekilde yükselip metni çizgi sanıyordu
+      // (bu dosyada 63 sahte dikey + 19 sahte yatay "çizgi" bulunmuştu,
+      // gerçek çizgi sayısı ise sıfırdı). Ayrım şu: gerçek bir çizgi UÇTAN
+      // UCA neredeyse kesintisiz doludur, metin ise ne kadar yoğun olursa
+      // olsun harfler arasında bolca boşluk bırakır. Çözüm: satır/sütun
+      // ORTALAMASI yerine, uzunluğunun YÜZDE KAÇININ PİKSEL PİKSEL koyu
+      // olduğunu ölçüyoruz (kapsam oranı) — eşiği görüntünün GENELİNE göre
+      // adaptif (göreli) tutmaya devam ediyoruz (açık gri çizgileri
+      // kaçırmamak için), ama artık "ortalama" değil "kaç piksel gerçekten
+      // koyu" sayıyoruz.
+      // PERFORMANS: ilk denemede medyan/maks için TÜM pikselleri sort()
+      // ediyorduk — büyük taranan bölgelerde (uzun tablolar) bu O(n log n)
+      // adım gerçek bir yavaşlama yarattı (285 dosyalık tam testte ~15
+      // dakikadan ~25+ dakikaya çıktı, kullanıcı fark etti). Sıralama yerine
+      // 256 kovalı bir HİSTOGRAM kullanıyoruz — aynı medyan/maks bilgisini
+      // O(n) sürede (sort'suz) veriyor. Piksel değerleri zaten 0-255
+      // aralığında olduğu için histogram kayıpsız/tam doğru.
+      const n = w * h;
+      const globalDevs = new Uint8Array(n);
+      const histogram = new Uint32Array(256);
+      for (let i = 0; i < n; i++) {
+        const d = deviation(i * 4);
+        globalDevs[i] = d;
+        histogram[d]++;
+      }
+      let globalMax = 255;
+      while (globalMax > 0 && histogram[globalMax] === 0) globalMax--;
+      let cum = 0, globalMedian = 0;
+      const half = n / 2;
+      for (let v = 0; v <= 255; v++) { cum += histogram[v]; if (cum >= half) { globalMedian = v; break; } }
+      const pixelThreshold = globalMedian + (globalMax - globalMedian) * 0.35;
+
+      // axis 'v': her x-sütunu için dikey boyunca kapsam oranı (dikey çizgi arar)
+      // axis 'h': her y-satırı için yatay boyunca kapsam oranı (yatay çizgi arar)
       const findLines = (axis) => {
         const n = axis === 'v' ? w : h;
         const other = axis === 'v' ? h : w;
-        const avgDev = new Array(n).fill(0);
+        const coverage = new Array(n).fill(0);
         for (let i = 0; i < n; i++) {
-          let sum = 0;
+          let darkCount = 0;
           for (let j = 0; j < other; j++) {
             const x = axis === 'v' ? i : j, y = axis === 'v' ? j : i;
-            sum += deviation((y * w + x) * 4);
+            if (globalDevs[y * w + x] > pixelThreshold) darkCount++;
           }
-          avgDev[i] = sum / other;
+          coverage[i] = darkCount / other;
         }
-        const sorted = [...avgDev].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        const max = sorted[sorted.length - 1];
-        const threshold = median + (max - median) * 0.35;
+        // %70 KAPSAM ŞARTI: gerçek bir çizgi uzunluğunun büyük çoğunluğunda
+        // kesintisiz koyu olmalı — metin (ne kadar yoğun olursa olsun) bu
+        // orana ulaşamaz, çünkü harfler arasında her zaman boşluk vardır.
         const cands = [];
-        for (let i = 0; i < n; i++) if (avgDev[i] > threshold && avgDev[i] > median * 1.4) cands.push(i);
+        for (let i = 0; i < n; i++) if (coverage[i] > 0.7) cands.push(i);
         // Bir çizginin kalınlığı birkaç piksel olabilir — bitişik olanları tek çizgiye indirgiyoruz.
         const merged = [];
         cands.forEach(i => { if (!merged.length || i - merged[merged.length - 1] >= 5) merged.push(i); });
@@ -2968,7 +3003,16 @@
       // hücrede (KDV Oranı'na komşu tutarın sızması) önsöz "% 20,00" bir
       // RAKAMLA bitiyor, harf şartı bunu kaçırıyordu. Şart, önsözün SADECE
       // boş olmaması (kendi başına anlamlı bir değer barındırması yeterli).
-      const NUMBER_BLEED = /^(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{1,4})$/;
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-E, farklı bir fatura): sızan sayı
+      // her zaman string'in TAM SONUNDA olmuyor — "1 Paket 333,333333TL"
+      // gibi, sayı ile birim arasında BOŞLUK olmadan bitişik de yazılabiliyor
+      // (TL sayının hemen ardına yapışmış), ÜSTELİK birim fiyat gibi hassas
+      // alanlarda ondalık kısım 4'ten fazla (ör. 6 hane, "333,333333")
+      // basamak taşıyabiliyor — sabit ",\d{1,4}" bunu kaçırıyordu. Sayının
+      // hemen ardından gelen isteğe bağlı birim sembolünü de (boşluklu/
+      // boşluksuz) yakalayıp BİRLİKTE taşıyacak, ondalık basamak sayısını da
+      // daha cömert (1-6 hane) kabul edecek şekilde genişletildi.
+      const NUMBER_BLEED = /^(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{1,6}\s*(?:TL|TRY|₺|%)?)$/i;
       const looksEmptyish = s => /^(TL|TRY|₺|%)?$/i.test(s.trim());
       const repairNumberBleed = row => {
         const out = row.slice();
