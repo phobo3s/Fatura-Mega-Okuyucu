@@ -63,6 +63,7 @@ atabilirsiniz. Ayrıntı: [Windows entegrasyonu](#windows-entegrasyonu-nasıl-ç
 | **Dışa aktarma** | Panoya kopyala (Excel'e yapıştırmaya hazır) veya CSV indir. |
 | **Manuel QR işaretleme** | Otomatik bulunamayan karekodu fareyle işaretleyip taratma; belirli bir satırı seçili yöntemle yeniden tarama (⋮ menüsü). |
 | **Kalem tablosu doğrulama** | Fatura içindeki "Sıra No" satır tablosunu (ürün/hizmet kalemleri) pdf.js metin konumlarından ve gerçek çizgi verisinden tespit eder, kalemlerin toplamını karekoddaki "Mal/Hizmet Tutarı" ile karşılaştırır. Tek fatura için 📋 butonu, tüm yüklenen faturalar için "🧾 Kalem Kontrolü (Tümü)" ile toplu tarama. "👁 Görsel Doğrulama" tespit edilen satır/sütun sınırlarını PDF sayfasının üzerine çizerek gösterir. |
+| **Hibrit çizgi algılama** | Tablo satır/sütun çizgileri önce PDF'in **kendi vektör çizim verisinden** (`getOperatorList` + SVG, piksel/renk eşiği gerektirmez) okunur — kenarlıklı (stroke'lu) hücre kutularının kenarları da tanınır. Bir eksende hiçbir çizgi bulunamazsa, o eksen için **piksel-kapsam** yöntemi (renderlenmiş sayfa üzerinde koyuluk taraması) yedek olarak devreye girer. 285+ gerçek faturayla doğrulandı; farklı yazılımların çok çeşitli çizim tarzlarına (ince çizgi, kenarlıklı kutu, çizgisiz) dayanıklı. |
 
 ---
 
