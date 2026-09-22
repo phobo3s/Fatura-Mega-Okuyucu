@@ -2722,21 +2722,19 @@
       // (ör. tablo dış kenarlığı) böylece asla kabul etmiyoruz, sadece gerçek
       // aday çizgileri "doğrular/hassaslaştırır".
       const lineHeight = anchor.h || 6; // .height gelmezse (nadiren) makul bir varsayılan
-      // DENENDİ, GERİ ALINDI (VENDOR-D): "row1Y + 3" yerine "row1Y +
-      // lineHeight" denendi çünkü bu vendor'da "Malzeme/Hizmet Tutarı"
-      // değeri 1. satırın rakamının ("1") bir satır YUKARISINDA basılıyor ve
-      // eski payla headerBandBottom'un yanlış (başlık) tarafında kalıp
-      // başlığa karışıyordu. Ama bu vendor'da AYNI dikey kayma HER satırda
-      // tekrarlıyor (2. satırın tutarı da 2. satırın kendi rakamından bir
-      // satır yukarıda) — bu da sütun bazlı bir kayma, satır bantları ise
-      // TÜM sütunlar için ORTAK/paylaşımlı olduğundan, 1. satırı düzeltmek
-      // bu sefer 2. satırın değerini 1. satırın hücresine karıştırdı (bir
-      // hücrede iki farklı satırın tutarı birleşti) — net kazanç değil, farklı
-      // bir hata. Gerçek çözüm sütun bazlı (satırdan bağımsız) hücre
-      // sınırları gerektirir, mevcut mimariye göre çok daha büyük bir
-      // değişiklik; ROI düşük (285 gerçek faturada sadece bu 1 vendor
-      // etkileniyor). Bilinen sınırlama olarak bırakılıyor.
-      const heightBasedGuess = Math.max(row1Y + 3, anchor.y - lineHeight * 6);
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-D, ekran görüntüsüyle doğrulandı):
+      // bazı vendor'larda bir sütunun tutarı ("Malzeme/Hizmet Tutarı") satır
+      // içinde İKİ görsel çizgiye yayılıyor — rakam üstte, birim "TL" bir alt
+      // satıra "taşıyor" (kutunun içinde sadece sayı değil, TL/% gibi
+      // semboller de ayrı satıra kayabiliyor). "row1Y + 3" payı bunu
+      // yakalayamayıp rakamı headerBandBottom'un yanlış (başlık) tarafında
+      // bırakıyordu. İLK DENEMEDE sadece burayı (+lineHeight) düzelttik ama
+      // AYNI kayma satırlar ARASINDA da tekrarladığı için (2. satırın tutarı
+      // 2. satırın kendi rakamının bir satır yukarısında) tek başına net
+      // kazanç sağlamadı — 2. satırın değeri 1. satırın hücresine karıştı.
+      // Şimdi AYNI +lineHeight payını rowBounds'taki HER satır geçişine de
+      // (aşağıda) uyguluyoruz — ikisi birlikte tutarlı çalışıyor.
+      const heightBasedGuess = Math.max(row1Y + lineHeight, anchor.y - lineHeight * 6);
       // GERÇEK ÖRNEKLE BULUNAN İKİNCİ HATA: bir dosyada tespit edilen çizgi
       // row1Y'ye NEREDEYSE BİTİŞİKTİ (aradaki fark <1 birim) — gerçek bir
       // ayraç değil, muhtemelen satırın kendi metin taban çizgisiyle
@@ -2905,9 +2903,22 @@
       // bittiği yer ile "1"in y'si arasındaki içerik NE başlığa NE satıra
       // dahil oluyor, kayboluyordu. Çözüm: 1. satır her zaman header'ın TAM
       // bittiği yerden başlasın (aradaki her şey satırın kendisidir).
+      //
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-D, ekran görüntüsüyle doğrulandı):
+      // AYNI kayma sorunu satırlar ARASINDA da tekrarlıyor, sadece
+      // başlık/1.satır arasında değil — bir sütunun tutarı ("6.434,33") satır
+      // içinde İKİ görsel çizgiye yayılıyor (rakam üstte, birim "TL" bir alt
+      // satıra "taşıyor"), ve o taşan "TL" tam bir SONRAKİ satırın rakamının
+      // hemen üstüne denk geliyor. Eski "+3" payı bunu yakalayamayıp bir
+      // sonraki satırın tutarını bir ÖNCEKİ satırın hücresine karıştırıyordu.
+      // Aynı düzeltmeyi (row1Y+3 yerine +lineHeight) HER satır geçişine
+      // genelleştiriyoruz — sınırları tek bir fonksiyonla hesaplayıp yTop/
+      // yBottom'un HER ZAMAN birebir aynı değeri paylaşmasını (boşluk/çakışma
+      // olmamasını) garantiliyoruz.
+      const boundaryBeforeRow = (i) => i === 0 ? headerBandBottom : rowStarts[i].y + lineHeight;
       const rowBounds = rowStarts.map((r, i) => ({
-        yTop: i === 0 ? headerBandBottom : r.y + 3,
-        yBottom: i + 1 < rowStarts.length ? rowStarts[i + 1].y + 3 : null
+        yTop: boundaryBeforeRow(i),
+        yBottom: i + 1 < rowStarts.length ? boundaryBeforeRow(i + 1) : null
       }));
       const knownHeights = rowBounds.filter(b => b.yBottom !== null).map(b => b.yTop - b.yBottom);
       const maxRowHeight = knownHeights.length ? Math.max(...knownHeights) : null;
