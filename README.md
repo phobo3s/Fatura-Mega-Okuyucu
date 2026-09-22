@@ -62,6 +62,7 @@ atabilirsiniz. Ayrıntı: [Windows entegrasyonu](#windows-entegrasyonu-nasıl-ç
 | **Türetilmiş alanlar** | Tevkifat tutarı ve oranı QR'da olmasa bile `Vergiler Dahil − Ödenecek` üzerinden hesaplanır. |
 | **Dışa aktarma** | Panoya kopyala (Excel'e yapıştırmaya hazır) veya CSV indir. |
 | **Manuel QR işaretleme** | Otomatik bulunamayan karekodu fareyle işaretleyip taratma; belirli bir satırı seçili yöntemle yeniden tarama (⋮ menüsü). |
+| **Kalem tablosu doğrulama** | Fatura içindeki "Sıra No" satır tablosunu (ürün/hizmet kalemleri) pdf.js metin konumlarından ve gerçek çizgi verisinden tespit eder, kalemlerin toplamını karekoddaki "Mal/Hizmet Tutarı" ile karşılaştırır. Tek fatura için 📋 butonu, tüm yüklenen faturalar için "🧾 Kalem Kontrolü (Tümü)" ile toplu tarama. "👁 Görsel Doğrulama" tespit edilen satır/sütun sınırlarını PDF sayfasının üzerine çizerek gösterir. |
 
 ---
 
@@ -154,6 +155,14 @@ girmez (`.gitignore`). Uygulama bu dosyalar yokken de sorunsuz açılır
   metni bu durumu açıklar.
 - **Sadece Chromium (Edge/Chrome) test edildi.** Firefox'ta `file://`
   davranışı farklı olabilir.
+- **Kalem tablosu doğrulama her faturada çalışmaz:** "Sıra No" (veya market/
+  toptancı fişlerinde EAN barkod) kavramı hiç olmayan bazı belge türlerinde
+  (GSM/internet hat detaylı telekom faturaları gibi) veya metin katmanı
+  olmayan taranmış PDF'lerde kalem tablosu bulunamaz — bu durumda
+  "Bulunamadı" gösterilir, ana QR/regex okuması bundan etkilenmez. Bazı
+  vendor'larda kalem toplamının karekoddaki "Mal/Hizmet Tutarı" ile birebir
+  eşleşmemesi (iskonto öncesi/sonrası veya KDV dahil/hariç fiyatlandırma
+  farkı gibi) gerçek bir muhasebe nüansı olabilir, illa hata anlamına gelmez.
 
 ---
 
