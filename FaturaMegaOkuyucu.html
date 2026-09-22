@@ -2679,8 +2679,18 @@
       // headerBandBottom row1Y'nin ÜSTÜNE çıktı, "1" rakamının kendisi
       // header bandına karıştı, satır hiç bulunamadı. Şimdi çizginin row1Y'den
       // EN AZ BİR SATIR YÜKSEKLİĞİ kadar yukarıda olmasını şart koşuyoruz.
+      //
+      // GERÇEK ÖRNEKLE BULUNAN ÜÇÜNCÜ HATA (AYNI KALIP, BAŞKA UÇTA): bir
+      // dosyada tespit edilen çizgi anchor'a ("Sıra" metninin kendisi)
+      // NEREDEYSE BİTİŞİKTİ (aradaki fark <0.4 birim!) — "y < anchor.y" şartı
+      // teknik olarak sağlanıyordu ama bu, anchor'ın KENDİ metin tabanının
+      // piksel yoğunluğuydu, gerçek bir ayraç değildi. headerBandBottom
+      // neredeyse anchor.y'ye eşit olunca TÜM başlık etiketleri (anchor
+      // hariç) bandın dışında kaldı, tek sütun (sadece "Sıra") algılandı.
+      // Şimdi çizginin anchor'dan da EN AZ BİR SATIR YÜKSEKLİĞİ kadar aşağıda
+      // olmasını şart koşuyoruz — anchor'ın kendi satırıyla asla karışmasın.
       const headerDividerLine = rowLines
-        .filter(y => y < anchor.y && y > row1Y + lineHeight && Math.abs(y - heightBasedGuess) < lineHeight * 8)
+        .filter(y => y < anchor.y - lineHeight && y > row1Y + lineHeight && Math.abs(y - heightBasedGuess) < lineHeight * 8)
         .sort((a, b) => b - a)[0];
       const headerBandBottom = headerDividerLine !== undefined
         ? headerDividerLine - 1
