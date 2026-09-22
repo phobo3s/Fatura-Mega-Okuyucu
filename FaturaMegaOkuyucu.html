@@ -220,6 +220,7 @@
             <button class="btn btn-sm btn-secondary" onclick="refreshAll()">🔄 Yenile</button>
             <button class="btn btn-sm btn-secondary" onclick="copyToClipboard()">📋 Panoya Kopyala</button>
             <button class="btn btn-sm" onclick="exportToCSV()">📥 CSV İndir</button>
+            <button class="btn btn-sm btn-secondary" onclick="runBulkLineItemCheck()" title="Her faturanın kalem tablosunu bulup, kalemlerin toplamının Mal/Hizmet Tutarı ile örtüşüp örtüşmediğini toplu kontrol eder">🧾 Kalem Kontrolü (Tümü)</button>
           </div>
           <div class="filename-width-control">
             <span>Dosya Adı Genişliği</span>
@@ -2197,7 +2198,8 @@
     const metaCols = [
       ['__filename', 'Dosya Adı', 'text-align:left;'],
       ['__source', 'Kaynak', ''],
-      ['__kontrol', 'Kontrol', '']
+      ['__kontrol', 'Kontrol', ''],
+      ['__kalem', 'Kalem Kontrolü', '']
     ];
     const fixedCols = FIELD_COLUMNS.map(([id, label]) => [id, label, '']);
     const dynCols = dynamicColumns.map(label => ['dyn:' + label, label, '']);
@@ -2232,11 +2234,29 @@
         sourceCell += `<button class="qr-locate-btn" title="Karekodun yerini elle işaretleyip yeniden tara" onclick="event.stopPropagation(); openQrPicker(${index})">📍</button>`;
       }
       sourceCell += `<button class="rescan-btn" title="Bu faturayı seçtiğin yöntemle tekrar tara" onclick="event.stopPropagation(); openRescanMenu(event, ${index})">⋮</button>`;
-      sourceCell += `<button class="rescan-btn" title="Fatura kalemleri (Sıra No tablosu) — bulunursa göster ve panoya kopyala" onclick="event.stopPropagation(); openLineItemTable(${index})">📋</button>`;
       tdContent += `<td>${sourceCell}</td>`;
       tdContent += failedChecks.length
         ? `<td><span class="badge badge-none" title="${escapeHtml(failedChecks.map(c => c.text).join(' | '))}">⚠ ${failedChecks.length}</span></td>`
         : `<td><span class="badge badge-ok">✓</span></td>`;
+
+      // "🧾 Kalem Kontrolü (Tümü)" toplu butonuyla doldurulur (bkz.
+      // runBulkLineItemCheck) — henüz koşulmadıysa boş (—) gösterilir.
+      // Rozete tıklamak, o satırın kalem tablosunu tek tek incelemek için
+      // aynı modalı (openLineItemTable) açar.
+      const lic = row.lineItemCheck;
+      let kalemCell;
+      if (!lic) {
+        kalemCell = `<span class="badge badge-ok" style="opacity:0.5;" title="Henüz kontrol edilmedi — üstteki 🧾 Kalem Kontrolü (Tümü) butonuna basın">—</span>`;
+      } else if (lic.status === 'not_found') {
+        kalemCell = `<span class="badge badge-none" title="Kalem tablosu bulunamadı (taranmış/vektör-çizim PDF ya da farklı bir tablo yapısı olabilir)">Yok</span>`;
+      } else if (lic.status === 'no_compare') {
+        kalemCell = `<span class="badge badge-ok" title="Kalem tablosu bulundu ama karşılaştırılacak Mal/Hizmet Tutarı yok">Bulundu</span>`;
+      } else if (lic.status === 'ok') {
+        kalemCell = `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) Mal/Hizmet Tutarı (${fmtNum(lic.target)}) ile örtüşüyor">✓</span>`;
+      } else {
+        kalemCell = `<span class="badge badge-none" title="Kalem toplamı (${fmtNum(lic.sum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(lic.target)}) — fark: ${fmtNum(lic.diff)}">⚠</span>`;
+      }
+      tdContent += `<td onclick="event.stopPropagation();" style="cursor:pointer;" title="Kalem tablosunu incele">${kalemCell}<button class="rescan-btn" onclick="openLineItemTable(${index})">📋</button></td>`;
 
       FIELD_COLUMNS.forEach(([id]) => {
         const val = row.fields[id];
@@ -2301,7 +2321,7 @@
 
   function renderFooterTotals() {
     const tfoot = document.getElementById('tableFooter');
-    let html = '<td colspan="3" style="text-align:left;"><b>TOPLAM (' + rows.length + ' fatura)</b></td>';
+    let html = '<td colspan="4" style="text-align:left;"><b>TOPLAM (' + rows.length + ' fatura)</b></td>';
 
     FIELD_COLUMNS.forEach(([id]) => {
       if (!SUMMABLE_FIELD_IDS.has(id)) { html += '<td></td>'; return; }
@@ -2949,6 +2969,60 @@
 
   function closeLineItemModal() {
     document.getElementById('lineItemModal').classList.remove('open');
+  }
+
+  // "🧾 Kalem Kontrolü (Tümü)" — tek tek satır satır 📋'ye basıp bakmak
+  // yerine, YÜKLENEN HER FATURADA kalem tablosunu bulup son sütun toplamını
+  // Mal/Hizmet Tutarı ile karşılaştırıyor, sonucu yeni "Kalem Kontrolü"
+  // sütununa (✓/⚠/Yok/Bulundu rozeti) yazıyor — tüm faturaların durumunu
+  // tek bakışta görmek için. Her dosya için ayrı bir canvas render + piksel
+  // taraması gerektiği için (çizgi tespiti) biraz sürebilir, bu yüzden
+  // mevcut ilerleme çubuğunu (processFiles ile aynı) kullanıyoruz.
+  async function runBulkLineItemCheck() {
+    if (!rows.length) return;
+    cancelRequested = false;
+    showProgress(0);
+
+    for (let i = 0; i < rows.length; i++) {
+      if (cancelRequested) {
+        setStatus(`İptal edildi: ${i}/${rows.length} fatura kontrol edildi.`);
+        break;
+      }
+      const file = lastFiles[i];
+      const row = rows[i];
+      setStatus(`Kalem kontrolü: ${i + 1}/${rows.length} — ${row.fileName}`);
+      showProgress(Math.round(((i + 1) / rows.length) * 100));
+
+      if (!file) { row.lineItemCheck = { status: 'not_found' }; continue; }
+
+      let pdf = null;
+      try {
+        const buf = await file.arrayBuffer();
+        pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+        const table = await detectLineItemTable(pdf);
+        if (!table) {
+          row.lineItemCheck = { status: 'not_found' };
+        } else {
+          const sum = sumLastColumn(table);
+          const target = parseTurkishNumber(row.fields.malHizmet);
+          if (sum === null || target === null) {
+            row.lineItemCheck = { status: 'no_compare', sum };
+          } else {
+            const ok = Math.abs(sum - target) <= VALIDATION_EPS;
+            row.lineItemCheck = { status: ok ? 'ok' : 'mismatch', sum, target, diff: target - sum };
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        row.lineItemCheck = { status: 'not_found' };
+      } finally {
+        if (pdf) pdf.destroy();
+      }
+    }
+
+    hideProgress();
+    setStatus(`Kalem kontrolü tamamlandı: ${rows.length} fatura.`);
+    renderTable();
   }
 
   // Görsel doğrulama ("boncuk"): tespit edilen sütun sınırlarını (mavi dikey
