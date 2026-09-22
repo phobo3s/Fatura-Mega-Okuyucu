@@ -2591,15 +2591,22 @@
   // yassı olmaz (kabaca kare orantılıdır) — yani ayrım RENK/EŞİK değil, SAF
   // GEOMETRİ, hiç ince ayar gerektirmiyor.
   // HİBRİT: vektör yöntemi birincil (hızlı, renk/eşik gerektirmez, PDF'in
-  // gerçek çizim verisini okur). Sadece o HİÇBİR çizgi bulamadığında (ör.
-  // VENDOR-A: gerçek bölücü, ayrı bir dikdörtgen değil, kenarlıklı/stroke'lu bir
-  // hücre kutusunun KENARI olarak çiziliyor — bboxOf() bunu kutunun tam
-  // boyutundan ayıramıyor) eski, kanıtlanmış piksel-kapsam yöntemini YEDEK
-  // olarak çalıştırıyoruz. Kullanıcı kararı: "Hibrit: vektör + piksel yedek".
+  // gerçek çizim verisini okur). EKSEN BAZINDA tamamlama yapıyoruz — ör.
+  // vektör colLines'ı bulup rowLines'ı bulamadıysa, SADECE rowLines için
+  // eski kanıtlanmış piksel-kapsam yöntemine başvuruyoruz; vektörün zaten
+  // bulduğu ekseni piksel sonucuyla EZMİYORUZ (ikisi farklı çizgi sayısı
+  // bulursa hangisi "doğru" belli değil, ama vektör zaten bulmuşsa ona
+  // güvenmek daha tutarlı — piksel yöntemi sadece boşluğu dolduruyor).
+  // Performans: her iki eksen de vektörle bulunduysa piksel yöntemi HİÇ
+  // çalışmıyor (çoğunluk durum). Kullanıcı kararı: "Hibrit: vektör + piksel yedek".
   async function detectTableGridLines(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
     const vec = await detectTableGridLinesVector(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf);
-    if (vec.colLines.length || vec.rowLines.length) return vec;
-    return detectTableGridLinesCanvas(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf);
+    if (vec.colLines.length && vec.rowLines.length) return vec;
+    const canvas = await detectTableGridLinesCanvas(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf);
+    return {
+      colLines: vec.colLines.length ? vec.colLines : canvas.colLines,
+      rowLines: vec.rowLines.length ? vec.rowLines : canvas.rowLines,
+    };
   }
 
   async function detectTableGridLinesVector(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
@@ -2660,6 +2667,58 @@
             && segYMax >= yBottomPdf - yMargin && segYMin <= yTopPdf + yMargin) colCandidates.push(pt0[0]);
         }
       }
+
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-A): bazı vendor'larda gerçek bölücü
+      // ayrı bir ince dikdörtgen değil, kenarlıklı (stroke'lu, fill:none)
+      // bir hücre kutusunun KENARI — yukarıdaki ince-dikdörtgen taraması
+      // bunu (bbox tüm kutunun boyutunda olduğu için) hiç yakalayamıyor.
+      // fill:none + gerçek stroke'u olan (renkli dolgu arka planlarını
+      // yanlışlıkla çizgi saymamak için fill'i OLANLARI hariç tutuyoruz)
+      // kutuların üst/alt/sol/sağ kenarlarını ayrı çizgi adayı olarak
+      // değerlendiriyoruz. TEK BAŞINA bir kutunun kenarı yeterli KANIT
+      // değil — sayfada tabloyla ilgisiz, tesadüfen bandımızla örtüşen
+      // başka bir kenarlıklı kutu (ör. logo çerçevesi) da aynı şekilde
+      // görünür. Gerçek bir tablo bölücüsünün AYIRT EDİCİ imzası: aynı
+      // satırdaki komşu hücreler onu PAYLAŞIR, yani o koordinatta EN AZ 2
+      // FARKLI kutunun kenarı çakışır. Bu yüzden önce tüm aday kenarları
+      // topluyor, sonra yalnızca ≥2 kutu tarafından paylaşılanları kabul
+      // ediyoruz (gerçek örnekle doğrulandı: tekil/gürültü kenarlar elendi).
+      const rowEdgeRaw = [], colEdgeRaw = [];
+      for (const p of paths) {
+        const d = p.getAttribute('d');
+        if (!d) continue;
+        if (p.getAttribute('fill') !== 'none') continue;
+        const stroke = p.getAttribute('stroke');
+        if (!stroke || stroke === 'none') continue;
+        const bb = bboxOf(d);
+        if (!bb) continue;
+        const ptTL = viewport.convertToPdfPoint(bb.x, bb.y);
+        const ptBR = viewport.convertToPdfPoint(bb.x + bb.w, bb.y + bb.h);
+        const xMinPdf = Math.min(ptTL[0], ptBR[0]), xMaxPdf = Math.max(ptTL[0], ptBR[0]);
+        const yMinPdf = Math.min(ptTL[1], ptBR[1]), yMaxPdf = Math.max(ptTL[1], ptBR[1]);
+        const xOverlap = xMaxPdf >= xLeftPdf - xMargin && xMinPdf <= xRightPdf + xMargin;
+        const yOverlap = yMaxPdf >= yBottomPdf - yMargin && yMinPdf <= yTopPdf + yMargin;
+        if (bb.w >= 15 && xOverlap) {
+          if (yMinPdf >= yBottomPdf - yMargin && yMinPdf <= yTopPdf + yMargin) rowEdgeRaw.push(yMinPdf);
+          if (yMaxPdf >= yBottomPdf - yMargin && yMaxPdf <= yTopPdf + yMargin) rowEdgeRaw.push(yMaxPdf);
+        }
+        if (bb.h >= 15 && yOverlap) {
+          if (xMinPdf >= xLeftPdf - xMargin && xMinPdf <= xRightPdf + xMargin) colEdgeRaw.push(xMinPdf);
+          if (xMaxPdf >= xLeftPdf - xMargin && xMaxPdf <= xRightPdf + xMargin) colEdgeRaw.push(xMaxPdf);
+        }
+      }
+      function sharedEdgesOnly(arr) {
+        const sorted = [...arr].sort((a, b) => a - b);
+        const groups = [];
+        sorted.forEach(v => {
+          const last = groups[groups.length - 1];
+          if (last && v - last.values[last.values.length - 1] <= 1) last.values.push(v);
+          else groups.push({ values: [v] });
+        });
+        return groups.filter(g => g.values.length >= 2).map(g => g.values[Math.floor(g.values.length / 2)]);
+      }
+      rowCandidates.push(...sharedEdgesOnly(rowEdgeRaw));
+      colCandidates.push(...sharedEdgesOnly(colEdgeRaw));
 
       // Aynı çizginin sütun-sütun çizilmiş ayrı segmentlerini (gerçek
       // örnekle bulundu: bazı vendor'lar bir satır çizgisini TEK parça değil,
