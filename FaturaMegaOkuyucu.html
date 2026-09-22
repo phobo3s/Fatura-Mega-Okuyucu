@@ -3257,10 +3257,19 @@
       return parseFlexibleAmount(tokens.length ? tokens[tokens.length - 1] : cleaned);
     };
 
+    // GERÇEK ÖRNEKLE BULUNDU (VENDOR-L): bazı
+    // vendor'larda hem iskonto ÖNCESİ brüt "Tutar" hem iskonto SONRASI
+    // "Net Tutar" sütunu var — QR'daki "Mal/Hizmet Tutarı" alanı BRÜT
+    // (iskonto öncesi) değeri temsil ediyor, ama sondan taradığımız için
+    // "Net Tutar" (daha sağda) önce eşleşip yanlış (düşük) toplamı
+    // veriyordu. İlk geçişte "Net" ön ekli/eşlikli Tutar sütunlarını da
+    // dışlıyoruz; SADECE hiçbir brüt Tutar sütunu bulunamazsa (bazı
+    // vendor'larda tek sütun zaten "Net Tutar" adıyla geçiyor) ikinci
+    // geçişte buna izin veriyoruz.
     let targetCol = -1;
     for (let col = table.headers.length - 1; col >= 0; col--) {
       const h = table.headers[col] || '';
-      if (/Tutar/i.test(h) && !/KDV|İskonto|Iskonto|Vergi/i.test(h)) { targetCol = col; break; }
+      if (/Tutar/i.test(h) && !/KDV|İskonto|Iskonto|Vergi|Net|İndirim|Indirim/i.test(h)) { targetCol = col; break; }
     }
     if (targetCol < 0) {
       // GERÇEK ÖRNEKLE BULUNDU (VENDOR-B, "EAN" çapalı tablo): bu
@@ -3270,6 +3279,15 @@
       for (let col = table.headers.length - 1; col >= 0; col--) {
         const h = table.headers[col] || '';
         if (/NetTop/i.test(h) && !/Kdv|Brüt|Brut|Promo/i.test(h)) { targetCol = col; break; }
+      }
+    }
+    if (targetCol < 0) {
+      // Hiçbir brüt Tutar/NetTop sütunu yoksa (tablo yalnızca "Net Tutar"
+      // adıyla tek bir tutar sütunu içeriyorsa), buna izin ver — ama
+      // İndirim Tutarı'nı (iskonto kalemi, asla toplam değil) yine hariç tut.
+      for (let col = table.headers.length - 1; col >= 0; col--) {
+        const h = table.headers[col] || '';
+        if (/Tutar/i.test(h) && !/KDV|İskonto|Iskonto|Vergi|İndirim|Indirim/i.test(h)) { targetCol = col; break; }
       }
     }
 
