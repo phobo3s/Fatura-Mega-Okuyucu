@@ -2983,14 +2983,23 @@
       // sızıyor. Gerçek çizgi genelde hücrenin SOL kenarında, metin ise
       // içeride biraz sağda başlar — yani metnin SOLA (çizgiye doğru)
       // düzeltilmesi güvenli, SAĞA düzeltilmesi ise metnin kendi etiketini
-      // kaybettiriyor. Bu yüzden sadece SOLA yapıştırmaya izin veriyoruz.
+      // kaybettiriyor. Bu yüzden SOLA yapıştırma ana yön — ama GERÇEK
+      // ÖRNEKLE BULUNDU (VENDOR-K, önizlemede sütun çizgileri
+      // "dandik" görünen dosya): bazen gerçek çizgi metin başlangıcının
+      // SADECE 1-2 birim gibi önemsiz bir miktar SAĞINDA (yuvarlama farkı)
+      // — böyle çizgiler saf "lx>x" şartıyla es geçiliyordu. bucketRow'un
+      // kendi toleransı (x0-4) zaten 4 birimlik bir pay bırakıyor; sağa
+      // doğru en fazla 3 birim taşmaya izin vermek bu payın İÇİNDE kalıyor
+      // (en kötü ihtimalle yeni eşik x0-1 oluyor, metin zaten x0'da
+      // başladığı için etiketini asla kaybetmiyor).
+      const SAG_TOLERANS = 3;
       if (detectedLines.length) {
         const preSnap = colStartX;
         colStartX = colStartX.map(x => {
           let nearest = null, bestDiff = Infinity;
           for (const lx of detectedLines) {
-            if (lx > x) continue; // sadece sola (<=x) kaydırmaya izin ver
-            const diff = x - lx;
+            if (lx > x + SAG_TOLERANS) continue; // sola serbest, sağa sadece ufak (bkz. SAG_TOLERANS) payla
+            const diff = Math.abs(x - lx);
             if (diff < bestDiff) { nearest = lx; bestDiff = diff; }
           }
           return (nearest !== null && bestDiff <= 15) ? Math.round(nearest) : x;
