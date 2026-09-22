@@ -2818,10 +2818,29 @@
         });
       }
 
+      // Özet satırlarının HER ZAMAN belirli anahtar kelimelerle başladığı
+      // gerçeğinden yararlanıyoruz — hem son satırın gerçek alt sınırını
+      // bulmak için (aşağıda), hem de GERÇEK ÖRNEKLE BULUNDU (VENDOR-C):
+      // bazı faturalarda özet kutusu son satırla AYNI Y yüksekliğinde, sayfa
+      // sağında ayrı bir yerde basılıyor — bu durumda Y-tabanlı kesim işe
+      // yaramıyor, özet metni ("Mal Hizmet Toplam Tutarı", "Ara Toplam" vb.)
+      // doğrudan o satırın hücrelerine (KDV Oranı, Tutar...) karışıyor. Bir
+      // hücrenin gerçek içeriği asla bu özet anahtar kelimelerini
+      // barındırmayacağından, bucketRow'da bunları BAŞTAN eliyoruz.
+      //
+      // GERÇEK ÖRNEKLE BULUNDU (AYNI dosya, VENDOR-C): bu vendor'ın
+      // PDF'inde bazı kelimelerin ORTASINA rastgele bir boşluk giriyor (font/
+      // kerning kusuru — "Toplam" yerine "T oplam", "Mavi" yerine "Mav i").
+      // Düz regex bunu YAKALAYAMIYORDU. Karşılaştırmadan önce TÜM boşlukları
+      // silerek eşleştiriyoruz — anahtar kelimelerin kendisinde zaten boşluk
+      // yok (tek istisna "Vergiler Dahil", o da boşluksuz hâliyle yazıldı).
+      const TOPLAM_ANAHTAR = /Toplam|VergilerDahil|Ödenecek|HesaplananKDV|Tevkifat[ıi]?Tutar[ıi]?/i;
+      const looksLikeSummary = str => TOPLAM_ANAHTAR.test(str.replace(/\s+/g, ''));
+
       // Bir y-aralığındaki metinleri sütun x-aralıklarına göre kovalayıp birleştirir.
       // Header bandı ve her veri satırı için AYNI mantık kullanılıyor.
       const bucketRow = (yTop, yBottom) => {
-        const bandItems = items.filter(it => it.y <= yTop && it.y > yBottom);
+        const bandItems = items.filter(it => it.y <= yTop && it.y > yBottom && !looksLikeSummary(it.str));
         return colStartX.map((x0, idx) => {
           const x1 = colStartX[idx + 1] ?? Infinity;
           const cellItems = bandItems.filter(it => it.x >= x0 - 4 && it.x < x1 - 4).sort((a, b) => b.y - a.y || a.x - b.x);
@@ -2905,10 +2924,10 @@
       // belirli anahtar kelimelerle başladığı gerçeğinden doğrudan gerçek
       // sınırı buluyoruz (tahmin değil, ölçüm). Anahtar kelime bulunamazsa
       // (nadiren) diğer satırların yüksekliğine, o da yoksa sabit 40'a düşüyoruz.
-      const TOPLAM_ANAHTAR = /Toplam|Vergiler\s*Dahil|Ödenecek|Hesaplanan\s*KDV|Tevkifat[ıi]?\s*Tutar[ıi]?/i;
+      // (TOPLAM_ANAHTAR yukarıda, bucketRow'dan önce tanımlandı.)
       const lastBound = rowBounds[rowBounds.length - 1];
       const summaryLine = items
-        .filter(it => it.y < lastBound.yTop && TOPLAM_ANAHTAR.test(it.str))
+        .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
         .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
       if (summaryLine) {
         lastBound.yBottom = summaryLine.y + 2;
