@@ -2844,8 +2844,16 @@
       // (Sıra No'da ~1, EAN'da ~13) yakın olmasını şart koşuyoruz — 13 haneli
       // bir barkodun yanında tek haneli bir "1" asla aynı sütunun gerçek
       // içeriği olamaz.
+      //
+      // ÜÇÜNCÜ GERÇEK ÖRNEKLE BULUNDU (VENDOR-F): bazı faturalarda satır
+      // numarasının kendi metni ("1"), başlık etiketinin ("Sıra") x'inden
+      // BİRAZ daha SOLDA başlıyor (ör. anchor.x=11.6 iken "1" x=7.6 —
+      // aradaki fark >4). "firstColX-4" payı bunu dışarıda bırakıp
+      // rowStarts'ı BOŞ bırakıyor, tablo hiç bulunamıyordu. belowCandidates
+      // zaten aynı amaçla "anchor.x-6" kullanıyor — aynı payı burada da
+      // uygulayarak tutarlı hale getiriyoruz.
       const rowStarts = items
-        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 4 && it.x < nextColX - 4)
+        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 6 && it.x < nextColX - 4)
         .filter(it => rowNumberPattern.test(it.str.trim()))
         .filter(it => it.str.trim().length >= Math.max(1, refDigitLen - 2))
         .sort((a, b) => b.y - a.y);
