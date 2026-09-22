@@ -2642,19 +2642,50 @@
       // tabloyla ilgisi yok, zaten ETTN QR/regex'ten geliyor. BAŞTAN ayıklıyoruz
       // (önceden sadece sütun sınırı hesabında ayıklıyorduk, metin toplarken
       // DEĞİL — bucketRow ham 'items'ı kullandığı için sızıntı devam ediyordu).
+      //
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-E): bazı vendor'larda tablonun
+      // hemen ÜSTÜNDE, "headerBandTop = anchor.y + 25" payının içine giren bir
+      // "Oluşma Zamanı: 17:02:57.6330000+03:00" gibi bağımsız bir metadata
+      // satırı basılıyor — tabloyla hiç ilgisi yok. Bu satır başlık
+      // kümelemesine girince (a) kendi başına SAHTE bir sütun oluşturuyor,
+      // (b) yanına denk gelen gerçek başlığı (ör. "KDV Oranı") kirletiyor,
+      // (c) bu da o sütundan sonraki TÜM sütunları kaydırıyor. ETTN'de olduğu
+      // gibi, tanınabilir metadata desenlerini (saat damgası + "Oluşma
+      // Zamanı" etiketi) BAŞTAN ayıklıyoruz — bir tablo başlığı/hücresi asla
+      // salt bir saat damgası olamaz.
       const items = tc.items.map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], h: it.height }))
-        .filter(it => it.str.trim() !== '' && !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str));
+        .filter(it => it.str.trim() !== ''
+          && !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str)
+          && !/^\d{1,2}:\d{2}:\d{2}(\.\d+)?(\+\d{2}:\d{2})?$/.test(it.str.trim())
+          && !/Olu[sş]ma\s*Zaman/i.test(it.str));
 
-      const anchor = items.find(it => { const n = normTRUpper(it.str); return n === 'SIRA' || n === 'SIRA NO'; });
+      let anchor = items.find(it => { const n = normTRUpper(it.str); return n === 'SIRA' || n === 'SIRA NO'; });
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-B): bazı market/toptancı
+      // faturalarında "Sıra No" kavramı hiç yok — tablo bir sıra numarasıyla
+      // değil, doğrudan EAN barkod koduyla başlıyor (başlıkta "EAN ART-No
+      // Artikel Tanımı ... NetTop. KdvKd KdvTut. BrütTop." gibi tamamen farklı
+      // bir kelime dağarcığı var). "Sıra"/"Sıra No" bulunamazsa "EAN"
+      // başlığını ikinci bir çapa olarak deniyoruz — geri kalan sütun
+      // kümeleme/satır tespiti mantığı AYNI kalıyor, sadece "1. sütundaki
+      // sayı" artık 1-4 haneli bir sıra no değil, çok haneli bir barkod
+      // olduğu için satır başlangıcı deseni de buna göre gevşetiliyor.
+      let rowNumberPattern = /^\d{1,4}$/;
+      if (!anchor) {
+        anchor = items.find(it => normTRUpper(it.str) === 'EAN');
+        if (anchor) rowNumberPattern = /^\d+$/;
+      }
       if (!anchor) continue;
 
       // 1. veri satırını İÇERİĞE göre bul (bkz. yukarıdaki yorum, madde 2).
       const belowCandidates = items
         .filter(it => it.y <= anchor.y + 5 && it.x >= anchor.x - 6 && it.x <= anchor.x + 40)
-        .filter(it => /^\d{1,4}$/.test(it.str.trim()))
+        .filter(it => rowNumberPattern.test(it.str.trim()))
         .sort((a, b) => b.y - a.y);
       if (!belowCandidates.length) continue;
       const row1Y = belowCandidates[0].y;
+      // Referans basamak sayısı: Sıra No'da ~1 (1,2,3...), EAN'da ~13
+      // (barkod). rowStarts'ı ararken bunu kullanacağız — bkz. aşağıdaki yorum.
+      const refDigitLen = belowCandidates[0].str.trim().length;
 
       const headerBandTop = anchor.y + 25;
 
@@ -2751,14 +2782,25 @@
       // daha güvenilir bir sınır. Çizgi bulunursa en yakın metin-sütununu ona
       // "yapıştırıyoruz" (±15 birim tolerans); çizgi yoksa (çizgisiz/
       // borderless tablo) metin tabanlı tahmin olduğu gibi kalır.
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-E, zaman damgası düzeltmesinden
+      // SONRA ortaya çıktı — önceden başka bir sızıntı tarafından maskeleniyordu):
+      // yapıştırma SAĞA doğru olursa (çizgi, başlığın kendi metninden daha
+      // BÜYÜK bir x'te ise) başlığın metni artık kendi sütununun (x0'ın)
+      // SOLUNDA kalıyor — bucketRow x'i "x0-4"ten küçük her şeyi bir ÖNCEKİ
+      // sütuna yazdığı için, başlığın kendi etiketi komşu (soldaki) sütuna
+      // sızıyor. Gerçek çizgi genelde hücrenin SOL kenarında, metin ise
+      // içeride biraz sağda başlar — yani metnin SOLA (çizgiye doğru)
+      // düzeltilmesi güvenli, SAĞA düzeltilmesi ise metnin kendi etiketini
+      // kaybettiriyor. Bu yüzden sadece SOLA yapıştırmaya izin veriyoruz.
       if (detectedLines.length) {
         colStartX = colStartX.map(x => {
-          let nearest = detectedLines[0], bestDiff = Math.abs(detectedLines[0] - x);
+          let nearest = null, bestDiff = Infinity;
           for (const lx of detectedLines) {
-            const diff = Math.abs(lx - x);
+            if (lx > x) continue; // sadece sola (<=x) kaydırmaya izin ver
+            const diff = x - lx;
             if (diff < bestDiff) { nearest = lx; bestDiff = diff; }
           }
-          return bestDiff <= 15 ? Math.round(nearest) : x;
+          return (nearest !== null && bestDiff <= 15) ? Math.round(nearest) : x;
         });
       }
 
@@ -2775,11 +2817,37 @@
 
       const headers = bucketRow(headerBandTop, headerBandBottom);
 
-      const firstColX = colStartX[0];
-      const nextColX = colStartX[1] ?? (firstColX + 9999);
+      // Satır başlangıcını ANCHOR'IN KENDİ sütununda ara — çoğu vendor'da
+      // (Sıra No) bu zaten en soldaki (colStartX[0]) sütun, ama GERÇEK
+      // ÖRNEKLE BULUNDU (VENDOR-B): "EAN" sütunundan ÖNCE boş, dar
+      // bir "MG" sütunu daha var — anchor'ı sabit colStartX[0] sanmak, boş
+      // "MG" sütununda hiç veri bulamayıp satırları hiç tespit edemiyordu.
+      const anchorColIdx = colStartX.reduce(
+        (best, x, idx) => Math.abs(x - anchor.x) < Math.abs(colStartX[best] - anchor.x) ? idx : best, 0
+      );
+      const firstColX = colStartX[anchorColIdx];
+      const nextColX = colStartX[anchorColIdx + 1] ?? (firstColX + 9999);
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-B): komşu sütun tamamen
+      // SAYISAL olduğunda (ör. "ART-No" kodları), sınıra ÇOK yakın bir değer
+      // (94 vs sınır 91 gibi) yuvarlama payı yüzünden "x < nextColX" testini
+      // geçip sahte bir ikinci satır başlangıcı sayılabiliyordu (aynı y'de
+      // iki "satır" -> sıfır yükseklikli boş satırlar). bucketRow'daki "x1-4"
+      // marjıyla simetrik olsun diye burada da aynı payı uyguluyoruz.
+      //
+      // İKİNCİ GERÇEK ÖRNEKLE BULUNDU (AYNI dosya): tablonun ÇOK altında,
+      // "Ödeme Notu : 1" gibi tabloyla hiç ilgisi olmayan bir metindeki tek
+      // haneli "1" bile EAN sütununun x-aralığına denk gelip SAHTE bir 4.
+      // "satır başlangıcı" sayılıyordu — bu da gerçek son satırın (KOSKA BAL)
+      // sınırını sayfanın çok aşağısına kadar genişletip ARADAKİ ÖZET BLOĞUNU
+      // (Mal Hizmet Toplam Tutarı vb.) yutuyordu. Çözüm: aday basamak
+      // sayısının, 1. satırı bulmakta kullandığımız REFERANS basamak sayısına
+      // (Sıra No'da ~1, EAN'da ~13) yakın olmasını şart koşuyoruz — 13 haneli
+      // bir barkodun yanında tek haneli bir "1" asla aynı sütunun gerçek
+      // içeriği olamaz.
       const rowStarts = items
-        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 4 && it.x < nextColX)
-        .filter(it => /^\d{1,4}$/.test(it.str.trim()))
+        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 4 && it.x < nextColX - 4)
+        .filter(it => rowNumberPattern.test(it.str.trim()))
+        .filter(it => it.str.trim().length >= Math.max(1, refDigitLen - 2))
         .sort((a, b) => b.y - a.y);
       if (!rowStarts.length) continue;
 
@@ -2876,12 +2944,34 @@
   //     iki parçası her zaman komşu sütunlardır.
   function sumLastColumn(table) {
     if (!table.rows.length) return null;
-    const tryParse = raw => raw ? parseFlexibleAmount(raw.replace(/TL|TRY/gi, '').trim()) : NaN;
+    // GERÇEK ÖRNEKLE BULUNDU (VENDOR-B): sütun sınırı tam metnin
+    // üzerinden geçtiğinde (ör. "Mikt" sütunundaki "1" değeri, hemen yanındaki
+    // "NetTop." sütununa sızıp "1 1.485,05" gibi İKİ değerin birleşmesine yol
+    // açıyor) — tüm hücreyi TEK sayı sanıp parse etmek yanlış/NaN sonuç
+    // veriyordu. Hücrenin SON boşlukla ayrılmış parçasını almak (asıl tutar
+    // her zaman en sonda) hem bu sızıntıyı tolere ediyor hem normal
+    // (tek değerli) hücrelerde davranışı değiştirmiyor.
+    const tryParse = raw => {
+      if (!raw) return NaN;
+      const cleaned = raw.replace(/TL|TRY/gi, '').trim();
+      const tokens = cleaned.split(/\s+/).filter(Boolean);
+      return parseFlexibleAmount(tokens.length ? tokens[tokens.length - 1] : cleaned);
+    };
 
     let targetCol = -1;
     for (let col = table.headers.length - 1; col >= 0; col--) {
       const h = table.headers[col] || '';
       if (/Tutar/i.test(h) && !/KDV|İskonto|Iskonto|Vergi/i.test(h)) { targetCol = col; break; }
+    }
+    if (targetCol < 0) {
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-B, "EAN" çapalı tablo): bu
+      // vendor'ın vokabülerinde "Tutar" kelimesi hiç geçmiyor, satır net
+      // toplamı "NetTop." (Net Toplam kısaltması) sütununda — aynı
+      // KDV/Brüt/Promo dışlama mantığıyla arıyoruz.
+      for (let col = table.headers.length - 1; col >= 0; col--) {
+        const h = table.headers[col] || '';
+        if (/NetTop/i.test(h) && !/Kdv|Brüt|Brut|Promo/i.test(h)) { targetCol = col; break; }
+      }
     }
 
     if (targetCol >= 0) {
