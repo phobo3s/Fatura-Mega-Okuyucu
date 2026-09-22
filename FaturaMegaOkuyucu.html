@@ -2722,6 +2722,20 @@
       // (ör. tablo dış kenarlığı) böylece asla kabul etmiyoruz, sadece gerçek
       // aday çizgileri "doğrular/hassaslaştırır".
       const lineHeight = anchor.h || 6; // .height gelmezse (nadiren) makul bir varsayılan
+      // DENENDİ, GERİ ALINDI (VENDOR-D): "row1Y + 3" yerine "row1Y +
+      // lineHeight" denendi çünkü bu vendor'da "Malzeme/Hizmet Tutarı"
+      // değeri 1. satırın rakamının ("1") bir satır YUKARISINDA basılıyor ve
+      // eski payla headerBandBottom'un yanlış (başlık) tarafında kalıp
+      // başlığa karışıyordu. Ama bu vendor'da AYNI dikey kayma HER satırda
+      // tekrarlıyor (2. satırın tutarı da 2. satırın kendi rakamından bir
+      // satır yukarıda) — bu da sütun bazlı bir kayma, satır bantları ise
+      // TÜM sütunlar için ORTAK/paylaşımlı olduğundan, 1. satırı düzeltmek
+      // bu sefer 2. satırın değerini 1. satırın hücresine karıştırdı (bir
+      // hücrede iki farklı satırın tutarı birleşti) — net kazanç değil, farklı
+      // bir hata. Gerçek çözüm sütun bazlı (satırdan bağımsız) hücre
+      // sınırları gerektirir, mevcut mimariye göre çok daha büyük bir
+      // değişiklik; ROI düşük (285 gerçek faturada sadece bu 1 vendor
+      // etkileniyor). Bilinen sınırlama olarak bırakılıyor.
       const heightBasedGuess = Math.max(row1Y + 3, anchor.y - lineHeight * 6);
       // GERÇEK ÖRNEKLE BULUNAN İKİNCİ HATA: bir dosyada tespit edilen çizgi
       // row1Y'ye NEREDEYSE BİTİŞİKTİ (aradaki fark <1 birim) — gerçek bir
