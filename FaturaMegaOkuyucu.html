@@ -3065,6 +3065,19 @@
       // (en kötü ihtimalle yeni eşik x0-1 oluyor, metin zaten x0'da
       // başladığı için etiketini asla kaybetmiyor).
       const SAG_TOLERANS = 3;
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-K ailesi): "en yakın çizgi 15
+      // birimden uzaksa yapıştırma" şeklinde bir üst sınır vardı — mantığı
+      // "metin tahmini zaten yaklaşık doğru, çizgi sadece küçük bir
+      // düzeltme" varsayımıydı. Ama GERÇEK ÖRNEKLE bu varsayım YANLIŞ
+      // çıktı: bazı vendor'larda metin tahmini (header etiketinin kendi
+      // girintisi yüzünden) gerçek çizgiden 27+ birim uzakta olabiliyor —
+      // bu durumda tavan, doğru olan ÇİZGİYİ reddedip YANLIŞ olan metin
+      // tahminini koruyordu (ör. bir Miktar sütununda sayı komşu hücreye
+      // sızıyordu, çünkü metin tahmini gerçek sınırın 27 birim sağındaydı).
+      // Kullanıcının sorusu doğruydu: "esas olan çizgi, olmazsa yazılar
+      // değil mi?" — çizgi bulunduğunda ona SONSUZ güvenmek (üst sınır
+      // olmadan), metin tahminine güvenmekten daha isabetli. Üst sınır
+      // TAMAMEN kaldırıldı; 285+75 dosyalık korpuda regresyon yok.
       if (detectedLines.length) {
         const preSnap = colStartX;
         colStartX = colStartX.map(x => {
@@ -3074,7 +3087,7 @@
             const diff = Math.abs(x - lx);
             if (diff < bestDiff) { nearest = lx; bestDiff = diff; }
           }
-          return (nearest !== null && bestDiff <= 15) ? Math.round(nearest) : x;
+          return (nearest !== null) ? Math.round(nearest) : x;
         });
         // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I, sonra VENDOR-J'da
         // DAHA HAFİF bir varyantı): iki AYRI (birbirine yakın) sütun kümesi
