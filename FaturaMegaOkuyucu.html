@@ -2879,6 +2879,19 @@
         page, page.view[0], page.view[2], headerBandTop, row1Y - 100
       );
 
+      // DENENDİ, GERİ ALINDI (VENDOR-M): görünüşte kesintisiz, kalın bir dikey
+      // sütun çizgisi (ekran görüntüsünde net görülüyor) ne vektörde (SVG'de
+      // o bölgede HİÇBİR çizim nesnesi yok) ne pikselde (satır-içi dar bantta
+      // bile kapsam oranı sadece ~%52 — muhtemelen her satırın kendi hücre
+      // kenarlığı AYRI çizilip aralarında piksel-düzeyinde küçük boşluklar
+      // bırakıyor, göz bunu birleşik tek çizgi sanıyor) tespit edilebiliyor.
+      // Başlık bandını dışlayan dar bir ikinci piksel taraması denendi, işe
+      // yaramadı (aynı düşük kapsam). Bu, CLAUDE.md'deki "AÇIK SORU" ile aynı
+      // kategoride yeni bir örnek — kodda düzeltilebilecek bir şey değil,
+      // veri doğruluğunu etkilemiyor (bu dosyada sütunlar zaten metin
+      // tabanlı tahminle doğru çıkıyor), sadece görsel önizlemede çizginin
+      // "olması gereken yerde" görünmemesine yol açıyor.
+
       // BİLİNEN SINIRLAMA — düzeltilen tuzak: "1. satır nerede başlıyor"
       // sorusunu SIRA NO sütunundaki ilk sayının y'sine bakarak buluyoruz, ama
       // gerçek örnekle bulundu: bazı vendor'larda o sayı satırın TEPESİNDE
@@ -3192,38 +3205,17 @@
 
       const dataRows = rowBounds.map(b => repairNumberBleed(bucketRow(b.yTop, b.yBottom)));
 
-      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I ailesi + VENDOR-N): tablonun SON
-      // sütununun başlığı ("Malzeme / Hizmet Tutarı" gibi) SAĞA YASLI iki
-      // satıra sarılınca, iki satırın x0'ı arasında 8 birimlik kümeleme
-      // eşiğini aşan bir fark oluşabiliyor (ör. "Malzeme/Hizmet" x=503,
-      // "Tutarı" x=518.6) — sahte bir EK sütun yaratıyor. İlk denemede "her
-      // satırda hep boş" şartı kullanıldı ama GERÇEK ÖRNEKLE BULUNDU
-      // (VENDOR-I, 2. satır): sahte sütun HER ZAMAN boş değil — gerçek değer
-      // satırdan satıra İKİ sahte sütun arasında (sayının genişliğine göre
-      // sınırı aşıp aşmamasına bağlı) YER DEĞİŞTİREBİLİYOR (1. satırda sağ
-      // sütunda, 2. satırda sol sütunda). Ayırt edici gerçek işaret "hep boş"
-      // değil, "hiçbir satırda İKİSİ BİRDEN dolu olmuyor" (karşılıklı dışlama)
-      // — bu, iki sütunun aynı mantıksal değerin bölünmüş parçaları olduğunu
-      // gösteriyor. SADECE tablonun EN SONUNDAKİ komşu çifti, TEK SEFERLİK
-      // birleştiriyoruz — zincirlemeye devam ETMİYORUZ, çünkü "Diğer
-      // Vergiler" gibi meşru ama bu faturada tesadüfen boş ORTA sütunları
-      // yanlışlıkla yutma riski var.
-      if (headers.length >= 2) {
-        const idx = headers.length - 2;
-        const hasAny = row => !!(row[idx] && row[idx].trim()) || !!(row[idx + 1] && row[idx + 1].trim());
-        const bothFilled = row => !!(row[idx] && row[idx].trim()) && !!(row[idx + 1] && row[idx + 1].trim());
-        const looksLikeSplitHeader = headers[idx].trim() !== ''
-          && dataRows.some(hasAny) && !dataRows.some(bothFilled);
-        if (looksLikeSplitHeader) {
-          headers[idx + 1] = (headers[idx] + ' ' + headers[idx + 1]).trim();
-          dataRows.forEach(row => {
-            if (row[idx] && row[idx].trim()) row[idx + 1] = row[idx];
-          });
-          headers.splice(idx, 1);
-          dataRows.forEach(row => row.splice(idx, 1));
-          colStartX.splice(idx, 1);
-        }
-      }
+      // DENENDİ, GERİ ALINDI: sağa yaslı çok satırlı son sütun başlığının
+      // (ör. "Malzeme/Hizmet" + "Tutarı" diye ikiye bölünmesi, VENDOR-I
+      // ailesi + VENDOR-N) "boşluk" desenine bakarak (hep boş / karşılıklı
+      // dışlama) otomatik birleştirilmesi denendi. Kullanıcı haklı olarak
+      // reddetti: ORTA bir sütun (ör. İskonto Tutarı, uygulanmadıysa) da
+      // tamamen meşru şekilde boş olabilir — küçük örneklemden (1-3 satır)
+      // "boşluk" çıkarıp buna göre birleştirmek, gerçekte İKİ FARKLI sütunu
+      // yanlışlıkla TEK hücrede karıştırma riski taşıyor (veri kaybı/
+      // karışması, kozmetik bir başlık kusurundan çok daha kötü). Bu yüzden
+      // sağa-yaslı-başlık-bölünmesi kozmetik bir SINIRLAMA olarak bırakıldı,
+      // veriyle (colStartX/dataRows) OYNANMIYOR — bkz. README Sınırlamalar.
 
       // 'debug' alanı: sadece görsel doğrulama (👁 butonu) için — sütun/satır
       // sınırlarını render edilmiş sayfanın üzerine çizebilmek için gerekli
