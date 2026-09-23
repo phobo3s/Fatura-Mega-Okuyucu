@@ -3161,7 +3161,19 @@
       // Düz regex bunu YAKALAYAMIYORDU. Karşılaştırmadan önce TÜM boşlukları
       // silerek eşleştiriyoruz — anahtar kelimelerin kendisinde zaten boşluk
       // yok (tek istisna "Vergiler Dahil", o da boşluksuz hâliyle yazıldı).
-      const TOPLAM_ANAHTAR = /Toplam|VergilerDahil|Ödenecek|HesaplananKDV|Tevkifat[ıi]?Tutar[ıi]?/i;
+      // GERÇEK ÖRNEKLE BULUNDU (e-SMM makbuzu): yukarıdaki anahtar kelimeler
+      // SADECE e-Fatura'nın özet terimleri — e-SMM'nin özet kutusu TAMAMEN
+      // FARKLI kelimeler kullanıyor ("Brüt Ücret Tutarı", "G.V Stopaj
+      // Tutarı", "Net Ücret Tutarı", "Tahsil Edilen KDV Tutarı"). Bunlardan
+      // hiçbiri tanınmayınca kod, özet kutusunun daha AŞAĞIDAKİ bir satırını
+      // (ör. "KDV Tevkifatı Tutarı", zaten Tevkifat...Tutar desenine
+      // uyduğu için) "ilk özet satırı" sanıp satırı oraya kadar (gerçek
+      // verinin ÇOK altına, 4 özet satırını yutarak) uzatıyordu. e-SMM'nin
+      // özet etiketlerini de ekliyoruz — SADECE tam "... Tutarı" halleriyle
+      // (ör. "BrütÜcretTutarı"), kısa köküyle DEĞİL ("Brüt Ücret" tek
+      // başına gerçek bir sütun başlığı olduğu için onu yanlışlıkla özet
+      // sanıp silmemek gerekiyor).
+      const TOPLAM_ANAHTAR = /Toplam|VergilerDahil|Ödenecek|HesaplananKDV|Tevkifat[ıi]?Tutar[ıi]?|BrütÜcretTutar[ıi]?|G\.?V\.?StopajTutar[ıi]?|NetÜcretTutar[ıi]?|TahsilEdilenKDVTutar[ıi]?/i;
       const looksLikeSummary = str => TOPLAM_ANAHTAR.test(str.replace(/\s+/g, ''));
 
       // Bir y-aralığındaki metinleri sütun x-aralıklarına göre kovalayıp birleştirir.
