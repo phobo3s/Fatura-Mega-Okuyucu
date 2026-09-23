@@ -2887,6 +2887,66 @@
     }
   }
 
+  // `detectLastRowBottomRawOps` ile AYNI izole ham-operatör tekniği, bu kez
+  // başlık bandının ÜST sınırı için (bkz. çağrı yerindeki headerBandTop
+  // yorumu). BİLİNÇLİ TASARIM KARARI: arama aralığını mevcut sabit payın
+  // (+25) İÇİNE hapsediyoruz ve en YAKIN (en küçük y, anchor'a en yakın)
+  // çizgiyi seçiyoruz — yani sonuç headerBandTop'u ESKİSİNDEN ASLA DAHA
+  // YUKARI TAŞIYAMAZ, sadece daha SIKI hale getirebilir.
+  async function detectHeaderTopRawOps(page, xLeftPdf, xRightPdf, yLowPdf, yHighPdf) {
+    try {
+      const opList = await page.getOperatorList();
+      const OPS = pdfjsLib.OPS;
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      const mul = (a, b) => [
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+      ];
+      const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+      const xMargin = 10;
+      const rawTop = [];
+      for (let i = 0; i < opList.fnArray.length; i++) {
+        const fn = opList.fnArray[i], args = opList.argsArray[i];
+        if (fn === OPS.save) stack.push(ctm.slice());
+        else if (fn === OPS.restore) ctm = stack.pop() || ctm;
+        else if (fn === OPS.transform) ctm = mul(args, ctm);
+        else if (fn === OPS.constructPath) {
+          const subOps = args[0], subArgs = args[1];
+          let ai = 0;
+          const pts = [];
+          for (const subOp of subOps) {
+            if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
+            else if (subOp === OPS.curveTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1]), apply(ctm, subArgs[ai + 2], subArgs[ai + 3]), apply(ctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
+            else if (subOp === OPS.rectangle) {
+              const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
+              pts.push(apply(ctm, rx, ry), apply(ctm, rx + rw, ry), apply(ctm, rx + rw, ry + rh), apply(ctm, rx, ry + rh));
+            }
+          }
+          if (!pts.length) continue;
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+          if (bh <= 3 && bw >= 15) {
+            if (by >= yLowPdf && by <= yHighPdf
+              && bx + bw >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) rawTop.push(by);
+          }
+        }
+      }
+      const sorted = [...rawTop].sort((a, b) => a - b);
+      const groups = [];
+      sorted.forEach(v => {
+        const last = groups[groups.length - 1];
+        if (last && v - last.values[last.values.length - 1] <= 3) last.values.push(v);
+        else groups.push({ values: [v] });
+      });
+      const reliable = groups.filter(g => g.values.length >= 2).map(g => g.values[Math.floor(g.values.length / 2)]);
+      return reliable.sort((a, b) => a - b)[0];
+    } catch (err) {
+      return undefined;
+    }
+  }
+
   // ESKİ YÖNTEM (piksel-kapsam) — artık sadece vektör yöntemi hiçbir çizgi
   // bulamadığında YEDEK olarak çalışıyor (VENDOR-A gibi, gerçek bölücünün ayrı
   // bir dikdörtgen değil kenarlıklı kutu kenarı olduğu nadir durumlar için).
@@ -3018,7 +3078,30 @@
       // (barkod). rowStarts'ı ararken bunu kullanacağız — bkz. aşağıdaki yorum.
       const refDigitLen = belowCandidates[0].str.trim().length;
 
-      const headerBandTop = anchor.y + 25;
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I ailesi, sonra VENDOR-Ş'de de
+      // görüldü): sabit "+25" payı, tablonun HEMEN ÜSTÜNDEKİ ilgisiz bir
+      // metadata satırını (ör. "E-Fatura" damgası,
+      // "Vergi No: ...", "Sipariş/Fatura Tarihi: ...") başlık bandına dahil
+      // ediyordu. Bu satırın X konumu genelde hiçbir gerçek sütunla
+      // çakışmadığı için TABLOYA HAYALET BİR SÜTUN EKLİYORDU (ör. "KDV
+      // Oranı" ile "KDV Tutarı" arasına, TÜM satırlarda tamamen BOŞ bir
+      // "E-Fatura" sütunu) — veri kaybı yoktu ama başlık/sütun sayısı
+      // gereğinden fazla çıkıyordu. Varsa gerçek çizgiyi (anchor.y+3 ile
+      // anchor.y+25 arasında, yani SADECE mevcut payın içinde) arayıp payı
+      // SIKILAŞTIRIYORUZ (asla genişletmiyoruz — bkz. detectHeaderTopRawOps
+      // yorumu). İLK DENEMEDE 285 dosyalık regresyonda "cols değişti" diye
+      // 19 dosya işaretlenince PANİKLE TAMAMEN GERİ ALINMIŞTI — ama asıl
+      // sorun bu 19 dosyanın GERÇEKTEN bozulmuş olması değil, diff script'inin
+      // sadece SÜTUN SAYISINA bakıp altındaki VERİYE bakmamasıydı. Detaylı
+      // inceleme (360 dosyanın tamamında toplam/sum karşılaştırması) TÜM
+      // dosyalarda toplamın birebir aynı kaldığını, "cols değişti" diye
+      // işaretlenen 22 dosyanın (19 yeni + 75'lik eski korpustan 3) HEPSİNİN
+      // yukarıdaki hayalet-sütun/kirli-başlık deseninin bir örneği olduğunu
+      // gösterdi — düzeltme GÜVENLİ.
+      const realHeaderTop = await detectHeaderTopRawOps(
+        page, page.view[0], page.view[2], anchor.y + 3, anchor.y + 25
+      );
+      const headerBandTop = (realHeaderTop !== undefined) ? realHeaderTop - 1 : anchor.y + 25;
 
       // ÖNCE GERÇEK ÇİZGİLERİ ARA (hem yatay hem dikey, tek canvas render'ında).
       // GERÇEK ÖRNEKLE BULUNDU: tarama aralığının GENİŞLİĞİ kritik — çok geniş
