@@ -2812,6 +2812,81 @@
     }
   }
 
+  // GERÇEK ÖRNEKLE BULUNDU (VENDOR-S, sonra VENDOR-A'da REGRESYON —
+  // detectTableGridLinesVector'a eklenen ilk deneme geri alındı): son
+  // satırın gerçek alt sınırını bulmak için SVGGraphics'in kaybettiği
+  // yatay "hairline" çizgileri ham `getOperatorList()` taramasıyla bulmak
+  // gerekiyor (VENDOR-M'deki dikey çözümle aynı prensip). İLK DENEME bunu
+  // `detectTableGridLinesVector`'ın PAYLAŞIMLI `rowLines` dönüşüne
+  // ekledi — ama bu değişken AYNI ZAMANDA `headerDividerLine`
+  // hesaplamasında da kullanılıyor, bu yüzden sarmalanan (çok satırlı)
+  // bir hücrenin İÇİNDEKİ ilgisiz bir çizgi başlık bandını da bozdu
+  // (VENDOR-A: 12 yerine 14 sütun). Çözüm: TAMAMEN İZOLE, kendi başına
+  // bir fonksiyon — hiçbir paylaşımlı değişkene dokunmuyor, SADECE
+  // çağıranın verdiği dar y-aralığında (son satırın hemen altı) arıyor
+  // ve sonucu doğrudan döndürüyor. Böylece başlık tespitini ASLA etkilemez.
+  async function detectLastRowBottomRawOps(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
+    try {
+      const opList = await page.getOperatorList();
+      const OPS = pdfjsLib.OPS;
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      const mul = (a, b) => [
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+      ];
+      const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-S, REGRESYON): yMargin>0 kullanınca
+      // çağıranın kasıtlı olarak dıştaladığı üst sınır (satırın KENDİ üst
+      // çizgisi, "yTop-3" ile bilerek hariç tutulmuştu) marj payı yüzünden
+      // yeniden içeri sızdı — satır neredeyse sıfır yüksekliğe indi (tüm
+      // hücreler boş çıktı). Çağıran zaten TAM olarak istediği dar aralığı
+      // veriyor, burada AYRICA marj eklemeye gerek yok — 0 kullanıyoruz.
+      const xMargin = 10, yMargin = 0;
+      const rawRow = [];
+      for (let i = 0; i < opList.fnArray.length; i++) {
+        const fn = opList.fnArray[i], args = opList.argsArray[i];
+        if (fn === OPS.save) stack.push(ctm.slice());
+        else if (fn === OPS.restore) ctm = stack.pop() || ctm;
+        else if (fn === OPS.transform) ctm = mul(args, ctm);
+        else if (fn === OPS.constructPath) {
+          const subOps = args[0], subArgs = args[1];
+          let ai = 0;
+          const pts = [];
+          for (const subOp of subOps) {
+            if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
+            else if (subOp === OPS.curveTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1]), apply(ctm, subArgs[ai + 2], subArgs[ai + 3]), apply(ctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
+            else if (subOp === OPS.rectangle) {
+              const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
+              pts.push(apply(ctm, rx, ry), apply(ctm, rx + rw, ry), apply(ctm, rx + rw, ry + rh), apply(ctm, rx, ry + rh));
+            }
+          }
+          if (!pts.length) continue;
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+          if (bh <= 3 && bw >= 15) {
+            if (by >= yBottomPdf - yMargin && by <= yTopPdf + yMargin
+              && bx + bw >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) rawRow.push(by);
+          }
+        }
+      }
+      // En az 2 kez tekrarlamalı (kenarlıklı-kutu/VENDOR-M mantığındaki aynı
+      // "≥2 paylaşım" ilkesi — tek seferlik/gürültü çizgileri eler).
+      const sorted = [...rawRow].sort((a, b) => a - b);
+      const groups = [];
+      sorted.forEach(v => {
+        const last = groups[groups.length - 1];
+        if (last && v - last.values[last.values.length - 1] <= 3) last.values.push(v);
+        else groups.push({ values: [v] });
+      });
+      const reliable = groups.filter(g => g.values.length >= 2).map(g => g.values[Math.floor(g.values.length / 2)]);
+      return reliable.sort((a, b) => b - a)[0]; // en yakın (en yüksek y) olanı döndür
+    } catch (err) {
+      return undefined;
+    }
+  }
+
   // ESKİ YÖNTEM (piksel-kapsam) — artık sadece vektör yöntemi hiçbir çizgi
   // bulamadığında YEDEK olarak çalışıyor (VENDOR-A gibi, gerçek bölücünün ayrı
   // bir dikdörtgen değil kenarlıklı kutu kenarı olduğu nadir durumlar için).
@@ -3295,18 +3370,33 @@
       // (nadiren) diğer satırların yüksekliğine, o da yoksa sabit 40'a düşüyoruz.
       // (TOPLAM_ANAHTAR yukarıda, bucketRow'dan önce tanımlandı.)
       const lastBound = rowBounds[rowBounds.length - 1];
-      // DENENDİ, GERİ ALINDI: son satırın alt sınırı için gerçek yatay
-      // çizgiye öncelik verilmesi (VENDOR-S, e-SMM makbuzu, için
-      // düzeltme) VENDOR-A'da ciddi bir regresyona yol açtı (bkz. yukarıdaki
-      // detectTableGridLinesVector yorumu) — TAMAMEN GERİ ALINDI, eski
-      // kanıtlanmış anahtar-kelime/varsayılan-yükseklik yöntemine dönüldü.
-      const summaryLine = items
-        .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
-        .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
-      if (summaryLine) {
-        lastBound.yBottom = summaryLine.y + 2;
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-S, e-SMM makbuzu): anahtar-kelime
+      // tahmini kaba — bazı dosyalarda gerçek sınırın epey ötesine taşıp
+      // özet kutusuyla satır arasındaki boş alanı da satırın parçası
+      // sayıyordu. İLK DENEMEDE bu düzeltme paylaşımlı `rowLines`
+      // değişkenine eklendi ve VENDOR-A'da regresyona yol açtı (bkz.
+      // `detectLastRowBottomRawOps` yorumu) — o yüzden burada TAMAMEN
+      // İZOLE, kendi başına bir tarama kullanıyoruz (hiçbir paylaşımlı
+      // değişkene dokunmuyor, `headerDividerLine` hesaplamasını ASLA
+      // etkilemez). Son satırın TAM ALTINDAKİ (en fazla 200 birim aşağı —
+      // en uzun bilinen sarmalanan satırdan (VENDOR-A, ~82 birim) bolca
+      // pay bırakıyor) en yakın gerçek yatay çizgi varsa ÖNCE onu
+      // kullanıyoruz; yoksa eski anahtar-kelime/varsayılan-yükseklik
+      // tahminine düşüyoruz.
+      const realLastRowBottom = await detectLastRowBottomRawOps(
+        page, page.view[0], page.view[2], lastBound.yTop - 3, lastBound.yTop - 200
+      );
+      if (realLastRowBottom !== undefined) {
+        lastBound.yBottom = realLastRowBottom;
       } else {
-        lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
+        const summaryLine = items
+          .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
+          .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
+        if (summaryLine) {
+          lastBound.yBottom = summaryLine.y + 2;
+        } else {
+          lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
+        }
       }
       rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - (maxRowHeight ?? 40); });
 
