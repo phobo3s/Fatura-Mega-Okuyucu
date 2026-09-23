@@ -3094,26 +3094,40 @@
       // sızıyordu, çünkü metin tahmini gerçek sınırın 27 birim sağındaydı).
       // Kullanıcının sorusu doğruydu: "esas olan çizgi, olmazsa yazılar
       // değil mi?" — çizgi bulunduğunda ona güvenmek, metin tahminine
-      // güvenmekten daha isabetli. Ama "ne kadar güvenelim" sorusunun
-      // cevabı çizginin NEREDE bulunduğuna bağlı: başlık bandında da
-      // bulunan bir çizgi (headerOnlyLines) için SINIRSIZ güveniyoruz;
-      // sadece veri satırlarında bulunan (başlığı hiç kesmeyen) bir çizgi
-      // için eski, güvenli 15 birimlik tavanı koruyoruz.
+      // güvenmekten daha isabetli. Ama GERÇEK ÖRNEKLE BULUNDU (VENDOR-R):
+      // "en yakın çizgiyi bul" yaklaşımı, tablonun HEMEN ALTINDAKİ özet
+      // kutusunun kendi kenarını, metin tahminine TESADÜFEN çok yakın
+      // düştüğü için "doğru" sanabiliyordu (özet kutusunun çizgisi metne
+      // ~0 birim, gerçek sütun çizgisi ise ~23 birim uzaktı — "en yakın"
+      // mantığı yanlış olanı seçiyordu). Çözüm İKİ AŞAMALI: ÖNCE SADECE
+      // başlık bandında da doğrulanmış çizgilere (headerOnlyLines) bak —
+      // varsa uzaklığa bakmaksızın SINIRSIZ güven (deneme: 40 birimlik bir
+      // tavan eklenmişti ama GERÇEK ÖRNEKLE bu da yanlış çıktı — "Birim
+      // Fiyat" sütununda gerçek düzeltme 47 birim gerektiriyordu, tavan
+      // bunu da reddedip metne geri düşürüyordu; tavan kaldırıldı). Başlık
+      // bandında bulunmuş olması ZATEN yeterli güvence — özet kutusu gibi
+      // ilgisiz yapılar (gerçek örnekle doğrulandı) başlığın kendi dar
+      // y-bandına hiç ulaşmıyor. Başlık bandında HİÇBİR aday yoksa (ör.
+      // VENDOR-M gibi sadece veri satırlarında çizgi olan dosyalar) eski
+      // güvenli 15 birimlik tavanla TÜM tabloda arıyoruz.
       if (detectedLines.length) {
         const preSnap = colStartX;
         colStartX = colStartX.map(x => {
-          let nearest = null, bestDiff = Infinity, nearestInHeader = false;
+          let headerNearest = null, headerBestDiff = Infinity;
+          for (const hx of headerOnlyLines) {
+            if (hx > x + SAG_TOLERANS) continue;
+            const diff = Math.abs(x - hx);
+            if (diff < headerBestDiff) { headerBestDiff = diff; headerNearest = hx; }
+          }
+          if (headerNearest !== null) return Math.round(headerNearest);
+
+          let nearest = null, bestDiff = Infinity;
           for (const lx of detectedLines) {
             if (lx > x + SAG_TOLERANS) continue; // sola serbest, sağa sadece ufak (bkz. SAG_TOLERANS) payla
             const diff = Math.abs(x - lx);
-            if (diff < bestDiff) {
-              bestDiff = diff;
-              nearest = lx;
-              nearestInHeader = headerOnlyLines.some(hx => Math.abs(hx - lx) <= 3);
-            }
+            if (diff < bestDiff) { bestDiff = diff; nearest = lx; }
           }
-          const capOk = nearestInHeader || bestDiff <= 15;
-          return (nearest !== null && capOk) ? Math.round(nearest) : x;
+          return (nearest !== null && bestDiff <= 15) ? Math.round(nearest) : x;
         });
         // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I, sonra VENDOR-J'da
         // DAHA HAFİF bir varyantı): iki AYRI (birbirine yakın) sütun kümesi
