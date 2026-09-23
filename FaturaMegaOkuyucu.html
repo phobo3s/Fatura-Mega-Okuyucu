@@ -2720,6 +2720,65 @@
       rowCandidates.push(...sharedEdgesOnly(rowEdgeRaw));
       colCandidates.push(...sharedEdgesOnly(colEdgeRaw));
 
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-M) — CLAUDE.md'deki "pdf.js render
+      // etmiyor mu?" sorusunun asıl cevabı: pdf.js İNCE ("hairline", 0-1
+      // birim genişlikte) DOLGULU dikdörtgenleri `getOperatorList()`'te
+      // GERÇEKTEN İÇERİYOR, ama `SVGGraphics.getSVG()` dönüşümü bunları
+      // path'e çevirirken KAYBEDİYOR (ham veri kayıplı değil, SADECE SVG
+      // dönüşümü kayıplı). PDF editöründe bu nesnenin seçilip
+      // düzenlenebilmesi de bunun gerçek bir çizim nesnesi olduğunu
+      // doğruladı — kullanıcı haklıydı. Çözüm: `getOperatorList()`'i
+      // SVG'ye hiç çevirmeden, CTM'yi (cumulative transform matrix)
+      // save/restore/transform komutlarıyla elle takip ederek doğrudan
+      // tarıyoruz.
+      // İKİNCİ GERÇEK ÖRNEKLE BULUNDU (AYNI dosya): dikey çizgi TEK parça
+      // değil, HER SATIR İÇİN AYRI kısa bir dikdörtgen olarak çiziliyor
+      // (satır yüksekliği kadar, ~9-18 birim) — genel "en az 15 birim uzun
+      // olmalı" şartı bunları eliyordu. Kısa parçalara da izin veriyoruz
+      // (>=6 birim) ama TEK BAŞINA bir kısa parça yeterli kanıt değil
+      // (gürültü riski) — kenarlıklı-kutu mantığındaki "≥2 paylaşım"
+      // ilkesiyle aynı şekilde, aynı x'te EN AZ 2 parça (farklı satırlardan)
+      // şart koşuyoruz (`sharedEdgesOnly`, yukarıda zaten tanımlı).
+      {
+        const OPS = pdfjsLib.OPS;
+        let rctm = [1, 0, 0, 1, 0, 0];
+        const rstack = [];
+        const mulM = (a, b) => [
+          a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+          a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+          a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+        ];
+        const applyM = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+        const rawColRaw = [];
+        for (let i = 0; i < opList.fnArray.length; i++) {
+          const fn = opList.fnArray[i], args = opList.argsArray[i];
+          if (fn === OPS.save) rstack.push(rctm.slice());
+          else if (fn === OPS.restore) rctm = rstack.pop() || rctm;
+          else if (fn === OPS.transform) rctm = mulM(args, rctm);
+          else if (fn === OPS.constructPath) {
+            const subOps = args[0], subArgs = args[1];
+            let ai = 0;
+            const pts = [];
+            for (const subOp of subOps) {
+              if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(applyM(rctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
+              else if (subOp === OPS.curveTo) { pts.push(applyM(rctm, subArgs[ai], subArgs[ai + 1]), applyM(rctm, subArgs[ai + 2], subArgs[ai + 3]), applyM(rctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
+              else if (subOp === OPS.rectangle) {
+                const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
+                pts.push(applyM(rctm, rx, ry), applyM(rctm, rx + rw, ry), applyM(rctm, rx + rw, ry + rh), applyM(rctm, rx, ry + rh));
+              }
+            }
+            if (!pts.length) continue;
+            const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+            const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+            if (bw <= 3 && bh >= 6) {
+              if (bx >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin
+                && by + bh >= yBottomPdf - yMargin && by <= yTopPdf + yMargin) rawColRaw.push(bx);
+            }
+          }
+        }
+        colCandidates.push(...sharedEdgesOnly(rawColRaw));
+      }
+
       // Aynı çizginin sütun-sütun çizilmiş ayrı segmentlerini (gerçek
       // örnekle bulundu: bazı vendor'lar bir satır çizgisini TEK parça değil,
       // her hücre için AYRI bir dikdörtgen olarak çiziyor) tek çizgiye indirger.
