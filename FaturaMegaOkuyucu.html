@@ -2779,6 +2779,23 @@
         colCandidates.push(...sharedEdgesOnly(rawColRaw));
       }
 
+      // DENENDİ, GERİ ALINDI (VENDOR-S, sonra VENDOR-A'da REGRESYON): dikey
+      // çizgilerle aynı "SVG'de kayboluyor" mantığıyla YATAY çizgiler için de
+      // ham operatör taraması eklenmişti (satırın gerçek alt sınırını bulmak
+      // için, e-SMM'de özet kutusuyla satır arasındaki boşluğu düzeltmek
+      // amacıyla). VENDOR-S dosyasında işe yaradı, AMA VENDOR-A'da
+      // (>=15 birim eşiğiyle bile) ciddi bir regresyona yol açtı: sarmalanan
+      // (çok satırlı) bir hücrenin İÇİNDEKİ bir çizgiyi headerDividerLine
+      // hesaplamasına karıştırıp başlık bandını yanlış konuma kaydırdı,
+      // sarmalanan satırın ortasındaki metin parçaları ("İZBESK ANA",
+      // "Diğer Vergiler Tevkifat...") sahte sütun başlığı sayıldı (12 yerine
+      // 14 sütun). Kök neden tam izole edilemedi (headerDividerLine ile
+      // rowLines paylaşımlı olduğu için satır tespiti güçlendirmesi başlık
+      // tespitini de dolaylı etkiliyor). VENDOR-A gibi kanıtlanmış bir dosyayı
+      // bozma riski, VENDOR-S'deki kozmetik kazançtan daha ağır bastığı için
+      // TAMAMEN GERİ ALINDI — satırın alt sınırı yine sadece özet-kelime/
+      // varsayılan-yükseklik tahminiyle hesaplanıyor (eski, kanıtlanmış yol).
+
       // Aynı çizginin sütun-sütun çizilmiş ayrı segmentlerini (gerçek
       // örnekle bulundu: bazı vendor'lar bir satır çizgisini TEK parça değil,
       // her hücre için AYRI bir dikdörtgen olarak çiziyor) tek çizgiye indirger.
@@ -3278,6 +3295,11 @@
       // (nadiren) diğer satırların yüksekliğine, o da yoksa sabit 40'a düşüyoruz.
       // (TOPLAM_ANAHTAR yukarıda, bucketRow'dan önce tanımlandı.)
       const lastBound = rowBounds[rowBounds.length - 1];
+      // DENENDİ, GERİ ALINDI: son satırın alt sınırı için gerçek yatay
+      // çizgiye öncelik verilmesi (VENDOR-S, e-SMM makbuzu, için
+      // düzeltme) VENDOR-A'da ciddi bir regresyona yol açtı (bkz. yukarıdaki
+      // detectTableGridLinesVector yorumu) — TAMAMEN GERİ ALINDI, eski
+      // kanıtlanmış anahtar-kelime/varsayılan-yükseklik yöntemine dönüldü.
       const summaryLine = items
         .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
         .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
