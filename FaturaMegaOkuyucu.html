@@ -221,7 +221,7 @@
             <button class="btn btn-sm btn-secondary" onclick="copyToClipboard()">📋 Panoya Kopyala</button>
             <button class="btn btn-sm" onclick="exportToCSV()">📥 CSV İndir</button>
             <button class="btn btn-sm btn-secondary" onclick="runBulkLineItemCheck()" title="Her faturanın kalem tablosunu bulup, kalemlerin toplamının Mal/Hizmet Tutarı ile örtüşüp örtüşmediğini toplu kontrol eder">🧾 Kalem Kontrolü (Tümü)</button>
-            <button class="btn btn-sm btn-secondary" onclick="exportAllLineItemsCSV()" title="Her faturanın kalem tablosunu bulup, her satırın başına fatura adını ekleyerek TEK bir CSV'de toplu indirir">📊 Kalemleri Toplu İndir (CSV)</button>
+            <button class="btn btn-sm btn-secondary" onclick="copyAllLineItemsToClipboard()" title="Her faturanın kalem tablosunu bulup, her satırın başına fatura adını ekleyerek TEK bir panoya kopyalar">📊 Kalemleri Toplu Kopyala</button>
           </div>
           <div class="filename-width-control">
             <span>Dosya Adı Genişliği</span>
@@ -3823,26 +3823,27 @@
     renderTable();
   }
 
-  // "📊 Kalemleri Toplu İndir (CSV)" — muhasebeci Ba/Bs veya genel kontrol
-  // için TEK TEK her faturanın kalem tablosunu açıp panoya kopyalamak yerine,
-  // YÜKLENEN HER FATURANIN kalem satırlarını, her satırın EN BAŞINA fatura
-  // adı eklenmiş halde TEK bir CSV'de topluyor. Vendor'lar arası sütun
-  // şeması (sayısı/anlamı) tamamen farklı olabildiği için (7-14 sütun) TEK
-  // bir ortak başlık satırı yanıltıcı olurdu — bu yüzden başlık satırı SADECE
-  // bir önceki faturanınkinden FARKLIYSA tekrar yazılıyor (aynı vendor'un
-  // ardışık faturalarında gereksiz tekrarı önlemek için, ama şema
-  // değiştiğinde okuyucuyu uyarmak için). Kalem tablosu bulunamayan faturalar
-  // sessizce atlanmıyor — dökümde "— kalem tablosu bulunamadı —" satırıyla
-  // görünür kalıyor, aksi halde kullanıcı o faturanın neden dökümde
-  // olmadığını anlayamaz.
-  async function exportAllLineItemsCSV() {
+  // "📊 Kalemleri Toplu Kopyala" — muhasebeci Ba/Bs veya genel kontrol için
+  // TEK TEK her faturanın kalem tablosunu açıp panoya kopyalamak (📋 tekil
+  // buton, bkz. `copyLineItemTableToClipboard`) yerine, YÜKLENEN HER
+  // FATURANIN kalem satırlarını, her satırın EN BAŞINA fatura adı eklenmiş
+  // halde TEK bir panoya kopyalıyor (`copyToClipboard`/`copyLineItemTableToClipboard`
+  // ile AYNI TAB-ayraçlı, Excel/Sheets'e doğrudan yapıştırılabilir format).
+  // Vendor'lar arası sütun şeması (sayısı/anlamı) tamamen farklı olabildiği
+  // için (7-14 sütun) TEK bir ortak başlık satırı yanıltıcı olurdu — bu
+  // yüzden başlık satırı SADECE bir önceki faturanınkinden FARKLIYSA tekrar
+  // yazılıyor (aynı vendor'un ardışık faturalarında gereksiz tekrarı
+  // önlemek için, ama şema değiştiğinde okuyucuyu uyarmak için). Kalem
+  // tablosu bulunamayan faturalar sessizce atlanmıyor — dökümde "— kalem
+  // tablosu bulunamadı —" satırıyla görünür kalıyor, aksi halde kullanıcı
+  // o faturanın neden dökümde olmadığını anlayamaz.
+  async function copyAllLineItemsToClipboard() {
     if (!rows.length) return;
     cancelRequested = false;
     showProgress(0);
 
-    let csvContent = "﻿"; // UTF-8 BOM (Türkçe karakterler Excel'de bozulmasın diye)
+    const lines = [];
     let lastHeaderKey = null;
-    const csvCell = v => `"${String(v || '').replace(/"/g, '""')}"`;
 
     for (let i = 0; i < rows.length; i++) {
       if (cancelRequested) {
@@ -3861,20 +3862,20 @@
         pdf = await pdfjsLib.getDocument({ data: buf }).promise;
         const table = await detectLineItemTable(pdf);
         if (!table) {
-          csvContent += [csvCell(file.name), csvCell('— kalem tablosu bulunamadı —')].join(';') + "\n";
+          lines.push([file.name, '— kalem tablosu bulunamadı —'].join('\t'));
           continue;
         }
         const headerKey = table.headers.join('|');
         if (headerKey !== lastHeaderKey) {
-          csvContent += [csvCell('Fatura Adı'), ...table.headers.map(csvCell)].join(';') + "\n";
+          lines.push(['Fatura Adı', ...table.headers].join('\t'));
           lastHeaderKey = headerKey;
         }
         table.rows.forEach(r => {
-          csvContent += [csvCell(file.name), ...r.map(csvCell)].join(';') + "\n";
+          lines.push([file.name, ...r].join('\t'));
         });
       } catch (err) {
         console.error(err);
-        csvContent += [csvCell(file.name), csvCell('— hata: ' + (err.message || String(err)) + ' —')].join(';') + "\n";
+        lines.push([file.name, '— hata: ' + (err.message || String(err)) + ' —'].join('\t'));
       } finally {
         if (pdf) pdf.destroy();
       }
@@ -3883,14 +3884,9 @@
     hideProgress();
     setStatus(`Kalem dökümü tamamlandı: ${rows.length} fatura.`);
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `Fatura_Mega_Kalemler_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      alert('Tüm faturaların kalem verileri panoya kopyalandı! Excel veya Google Sheets üzerine doğrudan yapıştırabilirsiniz.');
+    });
   }
 
   // Görsel doğrulama ("boncuk"): tespit edilen sütun sınırlarını (mavi dikey
