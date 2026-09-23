@@ -3192,6 +3192,39 @@
 
       const dataRows = rowBounds.map(b => repairNumberBleed(bucketRow(b.yTop, b.yBottom)));
 
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I ailesi + VENDOR-N): tablonun SON
+      // sütununun başlığı ("Malzeme / Hizmet Tutarı" gibi) SAĞA YASLI iki
+      // satıra sarılınca, iki satırın x0'ı arasında 8 birimlik kümeleme
+      // eşiğini aşan bir fark oluşabiliyor (ör. "Malzeme/Hizmet" x=503,
+      // "Tutarı" x=518.6) — sahte bir EK sütun yaratıyor. İlk denemede "her
+      // satırda hep boş" şartı kullanıldı ama GERÇEK ÖRNEKLE BULUNDU
+      // (VENDOR-I, 2. satır): sahte sütun HER ZAMAN boş değil — gerçek değer
+      // satırdan satıra İKİ sahte sütun arasında (sayının genişliğine göre
+      // sınırı aşıp aşmamasına bağlı) YER DEĞİŞTİREBİLİYOR (1. satırda sağ
+      // sütunda, 2. satırda sol sütunda). Ayırt edici gerçek işaret "hep boş"
+      // değil, "hiçbir satırda İKİSİ BİRDEN dolu olmuyor" (karşılıklı dışlama)
+      // — bu, iki sütunun aynı mantıksal değerin bölünmüş parçaları olduğunu
+      // gösteriyor. SADECE tablonun EN SONUNDAKİ komşu çifti, TEK SEFERLİK
+      // birleştiriyoruz — zincirlemeye devam ETMİYORUZ, çünkü "Diğer
+      // Vergiler" gibi meşru ama bu faturada tesadüfen boş ORTA sütunları
+      // yanlışlıkla yutma riski var.
+      if (headers.length >= 2) {
+        const idx = headers.length - 2;
+        const hasAny = row => !!(row[idx] && row[idx].trim()) || !!(row[idx + 1] && row[idx + 1].trim());
+        const bothFilled = row => !!(row[idx] && row[idx].trim()) && !!(row[idx + 1] && row[idx + 1].trim());
+        const looksLikeSplitHeader = headers[idx].trim() !== ''
+          && dataRows.some(hasAny) && !dataRows.some(bothFilled);
+        if (looksLikeSplitHeader) {
+          headers[idx + 1] = (headers[idx] + ' ' + headers[idx + 1]).trim();
+          dataRows.forEach(row => {
+            if (row[idx] && row[idx].trim()) row[idx + 1] = row[idx];
+          });
+          headers.splice(idx, 1);
+          dataRows.forEach(row => row.splice(idx, 1));
+          colStartX.splice(idx, 1);
+        }
+      }
+
       // 'debug' alanı: sadece görsel doğrulama (👁 butonu) için — sütun/satır
       // sınırlarını render edilmiş sayfanın üzerine çizebilmek için gerekli
       // ham koordinatlar. Tabloyu OKUMAK için gerekli değil, sadece GÖRMEK için.
