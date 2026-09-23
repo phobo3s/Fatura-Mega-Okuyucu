@@ -2609,104 +2609,126 @@
     };
   }
 
+  // MİMARİ DEĞİŞİKLİK — SVG render tamamen kaldırıldı: bu fonksiyon eskiden
+  // `page.getOperatorList()` + `pdfjsLib.SVGGraphics().getSVG()` ile PDF'i
+  // önce bir SVG DOM ağacına çevirip, sonra o ağacı tarıyordu. Ama
+  // `getOperatorList()` zaten TAM geometriyi (CTM ile gerçek koordinatlar)
+  // veriyor — SVG dönüşümünün kattığı TEK gerçek bilgi, bir path'in
+  // DOLGU (fill) mu ÇİZGİ (stroke) mi olduğuydu (SVG'nin `fill`/`stroke`
+  // DOM öznitelikleri). Bu bilgi aslında ham operatör akışında da var:
+  // her `constructPath`'in HEMEN ARDINDAN gelen boyama operatörü
+  // (`fill`/`eoFill`/`stroke`/`closeStroke`/...) o path'in nasıl
+  // boyandığını söylüyor — `getOperatorList()`'i SVG'ye çevirirken pdf.js
+  // zaten bunu okuyup DOM özniteliğine yazıyordu, biz de aynı bilgiyi
+  // kaynağından (SVG'nin ARA katmanı olmadan) okuyabiliyoruz.
+  //
+  // GERÇEK ÖRNEKLE DOĞRULANDI (VENDOR-A): eski yorumda bu dosyanın
+  // "kenarlıklı kutu (stroke) tespiti"ne ihtiyaç duyduğu yazıyordu, ama
+  // ham operatör incelemesinde VENDOR-A'da hedef bantta bu şartı sağlayan
+  // gerçek bir "stroke" boyama operatörü YOK — o dosyanın sözde "stroke
+  // kutusu" aslında bir HÜCRE KIRPMA dikdörtgeni (`re W n`, içerik taşmasın
+  // diye kullanılan görünmez bir kırpma sınırı), SVG dönüşümünün bunu
+  // (muhtemelen bir serileştirme tuhaflığıyla) `fill:none;stroke:...` olarak
+  // göstermesi bir YANILSAMAYMIŞ. Gerçek örnek: SMMM (Serbest Meslek
+  // Makbuzu) ailesindeki 2 dosyada (285+75 dosyalık korpusta TARANDI, bu
+  // katman SADECE bu 2 dosyada ≥2-paylaşım eşiğini geçiyor) hücreler
+  // GERÇEKTEN `stroke` operatörüyle çiziliyor — o yüzden bu katman siliniyor
+  // değil, kaynağı değişiyor (SVG DOM özniteliği yerine doğrudan
+  // `OPS.stroke`/`OPS.closeStroke` operatörü kontrolü).
+  //
+  // Performans yan faydası: `SVGGraphics.getSVG()` tüm sayfayı bir DOM
+  // ağacına render ediyordu (font/glyph işleme dahil, `embedFonts=false`
+  // olsa bile path üretimi maliyetli) — artık hiç çağrılmıyor, tek bir
+  // `getOperatorList()` + CTM taraması yeterli.
   async function detectTableGridLinesVector(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
     try {
-      const scale = 1; // scale=1 -> viewport piksel koordinatları PDF point'iyle bire bir (rotasyon yoksa)
-      const viewport = page.getViewport({ scale });
       const opList = await page.getOperatorList();
-      const svgGfx = new pdfjsLib.SVGGraphics(page.commonObjs, page.objs);
-      svgGfx.embedFonts = false; // font glyph verisine hiç ihtiyacımız yok, sadece path geometrisine
-      const svg = await svgGfx.getSVG(opList, viewport);
-
-      // SVG path verisi (ör. "M10 20L50 20L50 22L10 22Z") — DOM'a eklemeden,
-      // sadece 'd' string'indeki TÜM sayıları x,y çiftleri sayıp min/maks
-      // alarak bounding box çıkarıyoruz. Basit dikdörtgenler (bizim aradığımız
-      // çizgiler) için bu, getBBox() ile birebir aynı sonucu verir.
-      function bboxOf(d) {
-        const nums = d.match(/-?\d*\.?\d+(?:e-?\d+)?/g);
-        if (!nums || nums.length < 4) return null;
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i + 1 < nums.length; i += 2) {
-          const x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
-          if (x < minX) minX = x; if (x > maxX) maxX = x;
-          if (y < minY) minY = y; if (y > maxY) maxY = y;
-        }
-        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-      }
+      const OPS = pdfjsLib.OPS;
+      // SADECE "salt çizgi" (fill YOK) boyama operatörleri — SVG'nin eski
+      // "fill:none + stroke:var" şartıyla BİREBİR aynı anlam. Bilerek
+      // fillStroke/eoFillStroke'u DIŞARIDA bırakıyoruz (hem dolgulu hem
+      // çizgili path'ler SVG tarafında da fill:none SAYILMIYORDU).
+      const pureStrokeOps = new Set([OPS.stroke, OPS.closeStroke]);
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      const mul = (a, b) => [
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+      ];
+      const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 
       const xMargin = 10, yMargin = 10; // sınıra çok yakın segmentleri de kabul et (sütun bazlı çizilmiş satır çizgileri gibi)
-      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-A, en başından beri "gerçek yatay çizgi
-      // gerektiren" bilinen dosya): buradaki gerçek çizgilerin yüksekliği
-      // 2.4 PDF birimi — "h<=2" eşiğim bunu YALNIZCA 0.4 birim farkla
-      // kaçırıyordu (regresyon: bu dosya 12 yerine 14 sütun buluyordu, gerçek
-      // satır içeriği başlığa karışıyordu). Payı 3'e çıkarıyoruz.
       const colCandidates = [], rowCandidates = [];
-      const paths = svg.querySelectorAll('path');
-      for (const p of paths) {
-        const d = p.getAttribute('d');
-        if (!d) continue;
-        const bb = bboxOf(d);
-        if (!bb) continue;
-        if (bb.h <= 3 && bb.w >= 15) {
-          // GERÇEK ÖRNEKLE BULUNDU: sadece Y'ye bakmak yetmiyor — sayfada
-          // hedef tablomuzun X ARALIĞI DIŞINDA (ör. sağda ayrı bir "Sipariş
-          // Bilgileri" kutusu) ama AYNI Y aralığına denk gelen başka yatay
-          // çizgiler de olabiliyor, bunlar yanlışlıkla eşleşiyordu. Hem X hem
-          // Y örtüşmesini (segmentin İKİ UCUNU da) kontrol ediyoruz.
-          const pt0 = viewport.convertToPdfPoint(bb.x, bb.y);
-          const pt1 = viewport.convertToPdfPoint(bb.x + bb.w, bb.y);
-          const segXMin = Math.min(pt0[0], pt1[0]), segXMax = Math.max(pt0[0], pt1[0]);
-          if (pt0[1] >= yBottomPdf - yMargin && pt0[1] <= yTopPdf + yMargin
-            && segXMax >= xLeftPdf - xMargin && segXMin <= xRightPdf + xMargin) rowCandidates.push(pt0[1]);
-        } else if (bb.w <= 3 && bb.h >= 15) {
-          // Aynı mantık: dikey çizgi adayının Y ARALIĞI da hedef bantla örtüşmeli.
-          const pt0 = viewport.convertToPdfPoint(bb.x, bb.y);
-          const pt1 = viewport.convertToPdfPoint(bb.x, bb.y + bb.h);
-          const segYMin = Math.min(pt0[1], pt1[1]), segYMax = Math.max(pt0[1], pt1[1]);
-          if (pt0[0] >= xLeftPdf - xMargin && pt0[0] <= xRightPdf + xMargin
-            && segYMax >= yBottomPdf - yMargin && segYMin <= yTopPdf + yMargin) colCandidates.push(pt0[0]);
+      const rowEdgeRaw = [], colEdgeRaw = [];
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-M): dikey çizgi TEK parça değil, HER
+      // SATIR İÇİN AYRI kısa bir dikdörtgen olarak çiziliyor (satır
+      // yüksekliği kadar, ~9-18 birim) — genel "en az 15 birim uzun olmalı"
+      // şartı bunları eliyordu. Kısa parçalara da izin veriyoruz (>=6 birim)
+      // ama TEK BAŞINA bir kısa parça yeterli kanıt değil (gürültü riski) —
+      // kenarlıklı-kutu mantığındaki "≥2 paylaşım" ilkesiyle aynı şekilde,
+      // aynı x'te EN AZ 2 parça (farklı satırlardan) şart koşuyoruz.
+      const shortColRaw = [];
+
+      for (let i = 0; i < opList.fnArray.length; i++) {
+        const fn = opList.fnArray[i], args = opList.argsArray[i];
+        if (fn === OPS.save) stack.push(ctm.slice());
+        else if (fn === OPS.restore) ctm = stack.pop() || ctm;
+        else if (fn === OPS.transform) ctm = mul(args, ctm);
+        else if (fn === OPS.constructPath) {
+          const subOps = args[0], subArgs = args[1];
+          let ai = 0;
+          const pts = [];
+          for (const subOp of subOps) {
+            if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
+            else if (subOp === OPS.curveTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1]), apply(ctm, subArgs[ai + 2], subArgs[ai + 3]), apply(ctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
+            else if (subOp === OPS.rectangle) {
+              const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
+              pts.push(apply(ctm, rx, ry), apply(ctm, rx + rw, ry), apply(ctm, rx + rw, ry + rh), apply(ctm, rx, ry + rh));
+            }
+          }
+          if (!pts.length) continue;
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+          const xOverlap = bx + bw >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin;
+          const yOverlap = by + bh >= yBottomPdf - yMargin && by <= yTopPdf + yMargin;
+
+          // KATMAN 1 — İNCE (hairline) dikdörtgen/çizgi: boyama tipinden
+          // BAĞIMSIZ (SVG'nin eski path-bbox taramasıyla aynı davranış —
+          // o da fill/stroke ayrımı yapmadan SADECE geometriye bakıyordu).
+          // GERÇEK ÖRNEKLE BULUNDU (VENDOR-A): buradaki gerçek çizgilerin
+          // yüksekliği 2.4 PDF birimi — "h<=2" eşiği bunu kaçırıyordu
+          // (regresyon: 12 yerine 14 sütun). Payı 3'e çıkardık.
+          if (bh <= 3 && bw >= 15) {
+            if (xOverlap && by >= yBottomPdf - yMargin && by <= yTopPdf + yMargin) rowCandidates.push(by);
+          } else if (bw <= 3 && bh >= 15) {
+            if (yOverlap && bx >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) colCandidates.push(bx);
+          } else if (bw <= 3 && bh >= 6) {
+            if (yOverlap && bx >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) shortColRaw.push(bx);
+          }
+
+          // KATMAN 2 — KENARLIKLI (salt stroke) kutu kenarları: gerçek
+          // bölücü ayrı bir ince dikdörtgen değil, bir hücre kutusunun
+          // ÇİZİLMİŞ (fill YOK) kenarı olabilir — KATMAN 1 bunu (bbox tüm
+          // kutunun boyutunda olduğu için) hiç yakalayamaz. TEK BAŞINA bir
+          // kutunun kenarı yeterli kanıt değil — sayfada tabloyla ilgisiz,
+          // tesadüfen bandımızla örtüşen başka bir kenarlıklı kutu (ör. logo
+          // çerçevesi) da aynı şekilde görünür. Gerçek bir tablo
+          // bölücüsünün ayırt edici imzası: aynı satırdaki komşu hücreler
+          // onu PAYLAŞIR (≥2 paylaşım şartı, aşağıda `sharedEdgesOnly`).
+          if (pureStrokeOps.has(opList.fnArray[i + 1])) {
+            if (bw >= 15 && xOverlap) {
+              if (by >= yBottomPdf - yMargin && by <= yTopPdf + yMargin) rowEdgeRaw.push(by);
+              if (by + bh >= yBottomPdf - yMargin && by + bh <= yTopPdf + yMargin) rowEdgeRaw.push(by + bh);
+            }
+            if (bh >= 15 && yOverlap) {
+              if (bx >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) colEdgeRaw.push(bx);
+              if (bx + bw >= xLeftPdf - xMargin && bx + bw <= xRightPdf + xMargin) colEdgeRaw.push(bx + bw);
+            }
+          }
         }
       }
 
-      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-A): bazı vendor'larda gerçek bölücü
-      // ayrı bir ince dikdörtgen değil, kenarlıklı (stroke'lu, fill:none)
-      // bir hücre kutusunun KENARI — yukarıdaki ince-dikdörtgen taraması
-      // bunu (bbox tüm kutunun boyutunda olduğu için) hiç yakalayamıyor.
-      // fill:none + gerçek stroke'u olan (renkli dolgu arka planlarını
-      // yanlışlıkla çizgi saymamak için fill'i OLANLARI hariç tutuyoruz)
-      // kutuların üst/alt/sol/sağ kenarlarını ayrı çizgi adayı olarak
-      // değerlendiriyoruz. TEK BAŞINA bir kutunun kenarı yeterli KANIT
-      // değil — sayfada tabloyla ilgisiz, tesadüfen bandımızla örtüşen
-      // başka bir kenarlıklı kutu (ör. logo çerçevesi) da aynı şekilde
-      // görünür. Gerçek bir tablo bölücüsünün AYIRT EDİCİ imzası: aynı
-      // satırdaki komşu hücreler onu PAYLAŞIR, yani o koordinatta EN AZ 2
-      // FARKLI kutunun kenarı çakışır. Bu yüzden önce tüm aday kenarları
-      // topluyor, sonra yalnızca ≥2 kutu tarafından paylaşılanları kabul
-      // ediyoruz (gerçek örnekle doğrulandı: tekil/gürültü kenarlar elendi).
-      const rowEdgeRaw = [], colEdgeRaw = [];
-      for (const p of paths) {
-        const d = p.getAttribute('d');
-        if (!d) continue;
-        if (p.getAttribute('fill') !== 'none') continue;
-        const stroke = p.getAttribute('stroke');
-        if (!stroke || stroke === 'none') continue;
-        const bb = bboxOf(d);
-        if (!bb) continue;
-        const ptTL = viewport.convertToPdfPoint(bb.x, bb.y);
-        const ptBR = viewport.convertToPdfPoint(bb.x + bb.w, bb.y + bb.h);
-        const xMinPdf = Math.min(ptTL[0], ptBR[0]), xMaxPdf = Math.max(ptTL[0], ptBR[0]);
-        const yMinPdf = Math.min(ptTL[1], ptBR[1]), yMaxPdf = Math.max(ptTL[1], ptBR[1]);
-        const xOverlap = xMaxPdf >= xLeftPdf - xMargin && xMinPdf <= xRightPdf + xMargin;
-        const yOverlap = yMaxPdf >= yBottomPdf - yMargin && yMinPdf <= yTopPdf + yMargin;
-        if (bb.w >= 15 && xOverlap) {
-          if (yMinPdf >= yBottomPdf - yMargin && yMinPdf <= yTopPdf + yMargin) rowEdgeRaw.push(yMinPdf);
-          if (yMaxPdf >= yBottomPdf - yMargin && yMaxPdf <= yTopPdf + yMargin) rowEdgeRaw.push(yMaxPdf);
-        }
-        if (bb.h >= 15 && yOverlap) {
-          if (xMinPdf >= xLeftPdf - xMargin && xMinPdf <= xRightPdf + xMargin) colEdgeRaw.push(xMinPdf);
-          if (xMaxPdf >= xLeftPdf - xMargin && xMaxPdf <= xRightPdf + xMargin) colEdgeRaw.push(xMaxPdf);
-        }
-      }
       function sharedEdgesOnly(arr) {
         const sorted = [...arr].sort((a, b) => a - b);
         const groups = [];
@@ -2719,82 +2741,16 @@
       }
       rowCandidates.push(...sharedEdgesOnly(rowEdgeRaw));
       colCandidates.push(...sharedEdgesOnly(colEdgeRaw));
+      colCandidates.push(...sharedEdgesOnly(shortColRaw));
 
-      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-M) — CLAUDE.md'deki "pdf.js render
-      // etmiyor mu?" sorusunun asıl cevabı: pdf.js İNCE ("hairline", 0-1
-      // birim genişlikte) DOLGULU dikdörtgenleri `getOperatorList()`'te
-      // GERÇEKTEN İÇERİYOR, ama `SVGGraphics.getSVG()` dönüşümü bunları
-      // path'e çevirirken KAYBEDİYOR (ham veri kayıplı değil, SADECE SVG
-      // dönüşümü kayıplı). PDF editöründe bu nesnenin seçilip
-      // düzenlenebilmesi de bunun gerçek bir çizim nesnesi olduğunu
-      // doğruladı — kullanıcı haklıydı. Çözüm: `getOperatorList()`'i
-      // SVG'ye hiç çevirmeden, CTM'yi (cumulative transform matrix)
-      // save/restore/transform komutlarıyla elle takip ederek doğrudan
-      // tarıyoruz.
-      // İKİNCİ GERÇEK ÖRNEKLE BULUNDU (AYNI dosya): dikey çizgi TEK parça
-      // değil, HER SATIR İÇİN AYRI kısa bir dikdörtgen olarak çiziliyor
-      // (satır yüksekliği kadar, ~9-18 birim) — genel "en az 15 birim uzun
-      // olmalı" şartı bunları eliyordu. Kısa parçalara da izin veriyoruz
-      // (>=6 birim) ama TEK BAŞINA bir kısa parça yeterli kanıt değil
-      // (gürültü riski) — kenarlıklı-kutu mantığındaki "≥2 paylaşım"
-      // ilkesiyle aynı şekilde, aynı x'te EN AZ 2 parça (farklı satırlardan)
-      // şart koşuyoruz (`sharedEdgesOnly`, yukarıda zaten tanımlı).
-      {
-        const OPS = pdfjsLib.OPS;
-        let rctm = [1, 0, 0, 1, 0, 0];
-        const rstack = [];
-        const mulM = (a, b) => [
-          a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
-          a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
-          a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
-        ];
-        const applyM = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
-        const rawColRaw = [];
-        for (let i = 0; i < opList.fnArray.length; i++) {
-          const fn = opList.fnArray[i], args = opList.argsArray[i];
-          if (fn === OPS.save) rstack.push(rctm.slice());
-          else if (fn === OPS.restore) rctm = rstack.pop() || rctm;
-          else if (fn === OPS.transform) rctm = mulM(args, rctm);
-          else if (fn === OPS.constructPath) {
-            const subOps = args[0], subArgs = args[1];
-            let ai = 0;
-            const pts = [];
-            for (const subOp of subOps) {
-              if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(applyM(rctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
-              else if (subOp === OPS.curveTo) { pts.push(applyM(rctm, subArgs[ai], subArgs[ai + 1]), applyM(rctm, subArgs[ai + 2], subArgs[ai + 3]), applyM(rctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
-              else if (subOp === OPS.rectangle) {
-                const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
-                pts.push(applyM(rctm, rx, ry), applyM(rctm, rx + rw, ry), applyM(rctm, rx + rw, ry + rh), applyM(rctm, rx, ry + rh));
-              }
-            }
-            if (!pts.length) continue;
-            const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-            const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
-            if (bw <= 3 && bh >= 6) {
-              if (bx >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin
-                && by + bh >= yBottomPdf - yMargin && by <= yTopPdf + yMargin) rawColRaw.push(bx);
-            }
-          }
-        }
-        colCandidates.push(...sharedEdgesOnly(rawColRaw));
-      }
-
-      // DENENDİ, GERİ ALINDI (VENDOR-S, sonra VENDOR-A'da REGRESYON): dikey
-      // çizgilerle aynı "SVG'de kayboluyor" mantığıyla YATAY çizgiler için de
-      // ham operatör taraması eklenmişti (satırın gerçek alt sınırını bulmak
-      // için, e-SMM'de özet kutusuyla satır arasındaki boşluğu düzeltmek
-      // amacıyla). VENDOR-S dosyasında işe yaradı, AMA VENDOR-A'da
-      // (>=15 birim eşiğiyle bile) ciddi bir regresyona yol açtı: sarmalanan
-      // (çok satırlı) bir hücrenin İÇİNDEKİ bir çizgiyi headerDividerLine
-      // hesaplamasına karıştırıp başlık bandını yanlış konuma kaydırdı,
-      // sarmalanan satırın ortasındaki metin parçaları ("İZBESK ANA",
-      // "Diğer Vergiler Tevkifat...") sahte sütun başlığı sayıldı (12 yerine
-      // 14 sütun). Kök neden tam izole edilemedi (headerDividerLine ile
-      // rowLines paylaşımlı olduğu için satır tespiti güçlendirmesi başlık
-      // tespitini de dolaylı etkiliyor). VENDOR-A gibi kanıtlanmış bir dosyayı
-      // bozma riski, VENDOR-S'deki kozmetik kazançtan daha ağır bastığı için
-      // TAMAMEN GERİ ALINDI — satırın alt sınırı yine sadece özet-kelime/
-      // varsayılan-yükseklik tahminiyle hesaplanıyor (eski, kanıtlanmış yol).
+      // DENENDİ, GERİ ALINDI (VENDOR-S, sonra VENDOR-A'da REGRESYON): KISA
+      // parça ≥2-paylaşım tekniği YATAY çizgiler için de denenmişti (satırın
+      // gerçek alt sınırını bulmak için) — sarmalanan bir hücrenin İÇİNDEKİ
+      // ilgisiz bir çizgi başlık bandını bozdu (12 yerine 14 sütun). O yüzden
+      // burada (KATMAN 1'de) SADECE dikey kısa parçalara (`shortColRaw`) izin
+      // veriyoruz, yatay eşdeğeri YOK — satırın alt sınırı artık ayrı, izole
+      // bir fonksiyonla (`detectLastRowBottomRawOps`/`detectRowBoundaryRawOps`)
+      // çözülüyor, bu paylaşımlı fonksiyona hiç dokunmuyor.
 
       // Aynı çizginin sütun-sütun çizilmiş ayrı segmentlerini (gerçek
       // örnekle bulundu: bazı vendor'lar bir satır çizgisini TEK parça değil,
