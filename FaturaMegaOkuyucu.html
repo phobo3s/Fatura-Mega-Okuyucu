@@ -2888,6 +2888,74 @@
   }
 
   // `detectLastRowBottomRawOps` ile AYNI izole ham-operatör tekniği, bu kez
+  // İKİ VERİ SATIRI ARASINDAKİ sınır için. Fark: son satırda "en yakın" =
+  // aralığın EN ÜSTÜ (satırın kendi altı), burada ise "en yakın" = aralığın
+  // EN ALTI (bir SONRAKİ satırın numarasının hemen üstü) — çünkü elimizde
+  // güvenilir bir alt referans (rowStarts[i].y) var ve gerçek bir ayraç
+  // varsa, tipik olarak bir sonraki satırın hemen üstünde durur, ÖNCEKİ
+  // satırın (sarmalanmış olabilecek) içeriğinin ortasında değil. BİLİNÇLİ
+  // TASARIM KARARI: çağıran yTopPdf/yBottomPdf ile SIKI bir aralık veriyor
+  // (bir önceki satırın kendi numarasının bir satır altından, bir sonraki
+  // satırın numarasına kadar) — bu da `detectLastRowBottomRawOps`'taki
+  // yMargin=0 dersini burada da uyguluyor (çağıranın dıştaladığı sınırları
+  // tekrar içeri sızdırmamak için). GERÇEK ÇİZGİ HER ZAMAN YOK — çoğu
+  // faturada satırlar arasında çizgi bulunmuyor, bu NORMAL ve BEKLENEN
+  // (çağıran, undefined dönerse eski tahmine düşüyor).
+  async function detectRowBoundaryRawOps(page, xLeftPdf, xRightPdf, yTopPdf, yBottomPdf) {
+    try {
+      const opList = await page.getOperatorList();
+      const OPS = pdfjsLib.OPS;
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      const mul = (a, b) => [
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+      ];
+      const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+      const xMargin = 10, yMargin = 0;
+      const rawRow = [];
+      for (let i = 0; i < opList.fnArray.length; i++) {
+        const fn = opList.fnArray[i], args = opList.argsArray[i];
+        if (fn === OPS.save) stack.push(ctm.slice());
+        else if (fn === OPS.restore) ctm = stack.pop() || ctm;
+        else if (fn === OPS.transform) ctm = mul(args, ctm);
+        else if (fn === OPS.constructPath) {
+          const subOps = args[0], subArgs = args[1];
+          let ai = 0;
+          const pts = [];
+          for (const subOp of subOps) {
+            if (subOp === OPS.moveTo || subOp === OPS.lineTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1])); ai += 2; }
+            else if (subOp === OPS.curveTo) { pts.push(apply(ctm, subArgs[ai], subArgs[ai + 1]), apply(ctm, subArgs[ai + 2], subArgs[ai + 3]), apply(ctm, subArgs[ai + 4], subArgs[ai + 5])); ai += 6; }
+            else if (subOp === OPS.rectangle) {
+              const rx = subArgs[ai], ry = subArgs[ai + 1], rw = subArgs[ai + 2], rh = subArgs[ai + 3]; ai += 4;
+              pts.push(apply(ctm, rx, ry), apply(ctm, rx + rw, ry), apply(ctm, rx + rw, ry + rh), apply(ctm, rx, ry + rh));
+            }
+          }
+          if (!pts.length) continue;
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          const bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+          if (bh <= 3 && bw >= 15) {
+            if (by >= yBottomPdf - yMargin && by <= yTopPdf + yMargin
+              && bx + bw >= xLeftPdf - xMargin && bx <= xRightPdf + xMargin) rawRow.push(by);
+          }
+        }
+      }
+      const sorted = [...rawRow].sort((a, b) => a - b);
+      const groups = [];
+      sorted.forEach(v => {
+        const last = groups[groups.length - 1];
+        if (last && v - last.values[last.values.length - 1] <= 3) last.values.push(v);
+        else groups.push({ values: [v] });
+      });
+      const reliable = groups.filter(g => g.values.length >= 2).map(g => g.values[Math.floor(g.values.length / 2)]);
+      return reliable.sort((a, b) => a - b)[0]; // en yakın (en düşük y, bir sonraki satıra en yakın) olanı döndür
+    } catch (err) {
+      return undefined;
+    }
+  }
+
+  // `detectLastRowBottomRawOps` ile AYNI izole ham-operatör tekniği, bu kez
   // başlık bandının ÜST sınırı için (bkz. çağrı yerindeki headerBandTop
   // yorumu). BİLİNÇLİ TASARIM KARARI: arama aralığını mevcut sabit payın
   // (+25) İÇİNE hapsediyoruz ve en YAKIN (en küçük y, anchor'a en yakın)
@@ -3431,7 +3499,29 @@
       // genelleştiriyoruz — sınırları tek bir fonksiyonla hesaplayıp yTop/
       // yBottom'un HER ZAMAN birebir aynı değeri paylaşmasını (boşluk/çakışma
       // olmamasını) garantiliyoruz.
-      const boundaryBeforeRow = (i) => i === 0 ? headerBandBottom : rowStarts[i].y + lineHeight;
+      // ÖNLEYİCİ GENİŞLETME (son satırın alt sınırıyla AYNI mantık): ara
+      // satır sınırlarını da gerçek çizgiden almayı deniyoruz — ama ÇOĞU
+      // faturada satırlar arasında hiç çizgi YOK, bu NORMAL ve BEKLENEN.
+      // Her geçiş için AYRI, dar bir aralıkta (bir önceki satırın
+      // numarasının bir satır altından, bir sonraki satırın numarasına
+      // kadar) izole taramayı deniyoruz; bulunamazsa eski tahmine
+      // (rowStarts[i].y + lineHeight) düşüyoruz. 360 dosyalık (285+75) tam
+      // regresyonda TEK BİR toplam/sütun değişmedi — çizgi bazı dosyalarda
+      // gerçekten bulunuyor (örnekleme: ~50 geçişte 2) ama bulduğunda eski
+      // tahminle zaten örtüşüyor, sadece daha isabetli/gerçek bir kaynağa
+      // dayanıyor. `middleBoundaries` dizisi, yTop/yBottom'un komşu satırlar
+      // arasında HER ZAMAN birebir aynı değeri paylaşmasını (boşluk/çakışma
+      // olmamasını) garantiliyor — aynı `detectLastRowBottomRawOps`
+      // entegrasyonundaki gibi.
+      const middleBoundaries = [headerBandBottom];
+      for (let i = 1; i < rowStarts.length; i++) {
+        const naiveGuess = rowStarts[i].y + lineHeight;
+        const realBoundary = await detectRowBoundaryRawOps(
+          page, page.view[0], page.view[2], rowStarts[i - 1].y - lineHeight, rowStarts[i].y
+        );
+        middleBoundaries.push(realBoundary !== undefined ? realBoundary : naiveGuess);
+      }
+      const boundaryBeforeRow = (i) => middleBoundaries[i];
       const rowBounds = rowStarts.map((r, i) => ({
         yTop: boundaryBeforeRow(i),
         yBottom: i + 1 < rowStarts.length ? boundaryBeforeRow(i + 1) : null
