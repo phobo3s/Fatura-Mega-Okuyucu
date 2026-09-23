@@ -2938,6 +2938,24 @@
         page, page.view[0], page.view[2], headerBandTop, row1Y - 100
       );
 
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-K, sınırsız yapıştırma sonrası):
+      // "en yakın çizgiye sınırsız güven" güvenli AMA sadece çizginin
+      // GERÇEKTEN o sütunun ayracı olduğundan eminsek. Yukarıdaki tarama
+      // TÜM tablo bandını (başlık + veri satırları) kapsıyor — bu bantta
+      // bulunan bir çizgi, başlığı hiç kesmeyip SADECE veri satırları
+      // arasında duran alakasız bir çizgi de olabilir (ör. VENDOR-M'deki
+      // gibi satır-bazlı kısa parçalar). Kullanıcının önerisi: sınırsız
+      // güveni SADECE başlık satırının kendi bandında da bulunan çizgilere
+      // ver — veri-satırı-özel çizgiler için eski, güvenli 15 birimlik
+      // tavanı koru (VENDOR-M zaten bu tavanın içinde kaldığı için
+      // etkilenmiyor). Bunun için AYRI, dar bir tarama (SADECE başlık
+      // bandı: row1Y'nin hemen üstünden headerBandTop'a kadar, veri
+      // satırlarını hiç kapsamadan) yapıp o taramada bulunan çizgileri
+      // "güvenilir" (sınırsız) sayıyoruz.
+      const headerOnlyLines = (await detectTableGridLinesVector(
+        page, page.view[0], page.view[2], headerBandTop, row1Y + 3
+      )).colLines;
+
       // DENENDİ, GERİ ALINDI (VENDOR-M): görünüşte kesintisiz, kalın bir dikey
       // sütun çizgisi (ekran görüntüsünde net görülüyor) ne vektörde (SVG'de
       // o bölgede HİÇBİR çizim nesnesi yok) ne pikselde (satır-içi dar bantta
@@ -3075,19 +3093,27 @@
       // tahminini koruyordu (ör. bir Miktar sütununda sayı komşu hücreye
       // sızıyordu, çünkü metin tahmini gerçek sınırın 27 birim sağındaydı).
       // Kullanıcının sorusu doğruydu: "esas olan çizgi, olmazsa yazılar
-      // değil mi?" — çizgi bulunduğunda ona SONSUZ güvenmek (üst sınır
-      // olmadan), metin tahminine güvenmekten daha isabetli. Üst sınır
-      // TAMAMEN kaldırıldı; 285+75 dosyalık korpuda regresyon yok.
+      // değil mi?" — çizgi bulunduğunda ona güvenmek, metin tahminine
+      // güvenmekten daha isabetli. Ama "ne kadar güvenelim" sorusunun
+      // cevabı çizginin NEREDE bulunduğuna bağlı: başlık bandında da
+      // bulunan bir çizgi (headerOnlyLines) için SINIRSIZ güveniyoruz;
+      // sadece veri satırlarında bulunan (başlığı hiç kesmeyen) bir çizgi
+      // için eski, güvenli 15 birimlik tavanı koruyoruz.
       if (detectedLines.length) {
         const preSnap = colStartX;
         colStartX = colStartX.map(x => {
-          let nearest = null, bestDiff = Infinity;
+          let nearest = null, bestDiff = Infinity, nearestInHeader = false;
           for (const lx of detectedLines) {
             if (lx > x + SAG_TOLERANS) continue; // sola serbest, sağa sadece ufak (bkz. SAG_TOLERANS) payla
             const diff = Math.abs(x - lx);
-            if (diff < bestDiff) { nearest = lx; bestDiff = diff; }
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              nearest = lx;
+              nearestInHeader = headerOnlyLines.some(hx => Math.abs(hx - lx) <= 3);
+            }
           }
-          return (nearest !== null) ? Math.round(nearest) : x;
+          const capOk = nearestInHeader || bestDiff <= 15;
+          return (nearest !== null && capOk) ? Math.round(nearest) : x;
         });
         // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I, sonra VENDOR-J'da
         // DAHA HAFİF bir varyantı): iki AYRI (birbirine yakın) sütun kümesi
