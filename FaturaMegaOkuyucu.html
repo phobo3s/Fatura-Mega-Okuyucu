@@ -3108,9 +3108,22 @@
       // "2 6 , 2 5") — bu her zaman kırık harf aralığıdır. En az 3 parça
       // şartı, başka vendor'larda meşru olabilecek 2 parçalı gerçek
       // boşlukları (ör. "% 1") yanlışlıkla birleştirmemek için.
+      // GERÇEK ÖRNEKLE BULUNDU (AYNI vendor, VENDOR-P, başka bir dosya):
+      // aynı bozukluk İKİ haneli sıra numaralarında da oluyor ("10" ->
+      // "1 0", "11" -> "1 1", ... "14" -> "1 4") — ama bunlar sadece 2
+      // parça olduğu için yukarıdaki "3+" şartını geçemiyor, birleşmiyor.
+      // Sonuç: "1 0" satır numarası deseniyle (`/^\d{1,4}$/`) eşleşmiyor,
+      // 10-14 numaralı kalemler YENİ satır başlangıcı sayılmıyor, hepsi
+      // 9. satırın hücrelerine karışıyordu ("son kalemi toparlayamadı").
+      // DAR bir ikinci kural ekliyoruz: parça sayısı TAM 2 VE HER İKİSİ
+      // DE TEK BİR RAKAMSA birleştir — "% 1" gibi meşru 2 parçalı
+      // durumları etkilemez (ilk parça rakam değil), sadece "İKİ bitişik
+      // rakamın arasına giren" spesifik deseni hedefler.
       const collapseLetterSpacing = str => {
         const parts = str.split(' ');
-        return (parts.length >= 3 && parts.every(p => p.length === 1)) ? parts.join('') : str;
+        if (parts.length >= 3 && parts.every(p => p.length === 1)) return parts.join('');
+        if (parts.length === 2 && parts.every(p => /^\d$/.test(p))) return parts.join('');
+        return str;
       };
       const items = tc.items.map(it => ({ str: collapseLetterSpacing(it.str), x: it.transform[4], y: it.transform[5], h: it.height }))
         .filter(it => it.str.trim() !== ''
