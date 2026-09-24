@@ -3106,6 +3106,21 @@
         anchor = items.find(it => normTRUpper(it.str) === 'EAN');
         if (anchor) rowNumberPattern = /^\d+$/;
       }
+      // DENENDİ, GERİ ALINDI (VENDOR-P): "Sıra"/"Sıra No"/"EAN" bulunamazsa
+      // tek başına "No" başlığını üçüncü bir çapa olarak deneme fikri —
+      // sadece hemen altında/yanında 1-4 haneli bir sayı var mı diye
+      // doğrulasa bile YETERSİZ kaldı. Tam 285+75 dosyalık regresyonda 3
+      // YANLIŞ POZİTİF üretti: bir belediye vergi makbuzunda "GIB SİCİL NO"
+      // etiketine kilitlenip 21 anlamsız sütun uydurdu, bozuk fontlu bir
+      // noter makbuzunda sum=0 saçma bir tablo üretti, gerçek bir "Sıra No"
+      // tablosu olan bir dosyada ise harfler arası bozuk boşluk yüzünden
+      // ("S ı ra No" gibi — collapseLetterSpacing bunu yakalayamadı çünkü
+      // parçalar eşit uzunlukta değil) doğru çapa yerine yanlış bir "No"ya
+      // kilitlenip başlıkları tamamen saçmalattı. "No" tek başına aşırı
+      // genel — "1-4 haneli sayı altında var mı" testi rastgele metinde çok
+      // kolay tesadüfen sağlanıyor, güvenilir bir imza DEĞİL. TAMAMEN GERİ
+      // ALINDI. Bu tarz belge türleri (Sıra No hiç yok) bu özelliğin
+      // kapsamı dışında kalmaya devam ediyor.
       if (!anchor) continue;
 
       // 1. veri satırını İÇERİĞE göre bul (bkz. yukarıdaki yorum, madde 2).
