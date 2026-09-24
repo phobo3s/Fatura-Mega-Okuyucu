@@ -3516,17 +3516,31 @@
       const realLastRowBottom = await detectLastRowBottomRawOps(
         page, page.view[0], page.view[2], lastBound.yTop - 3, lastBound.yTop - 200
       );
-      if (realLastRowBottom !== undefined) {
+      // GERÇEK ÖRNEKLE BULUNDU (VENDOR-Ç): bu tablonun altında GERÇEK
+      // bir çizgi hiç yok — ama hemen altındaki yoğun özet ızgarasında
+      // ("Vergiler Dahil Toplam Tutar" etiketi ve değeri altındaki süsleme
+      // alt çizgileri) `detectLastRowBottomRawOps` yine de ≥2-paylaşımlı
+      // ince dikdörtgenler buluyordu — bunlar tablo sınırı DEĞİL, özet
+      // kutusunun İÇİNDEKİ dekoratif alt çizgilerdi. Sonuç: satırın alt
+      // sınırı özetin ÇOK ALTINA (352 vs gerçek ~390) kayıyor, tüm özet
+      // metni (KDV/Vergiler Dahil/Ödenecek satırları) yanlışlıkla son
+      // satırın hücrelerine karışıyordu (satır yüksekliği 65 birim, diğer
+      // satırlar 11 birim).
+      // SAĞLIK KONTROLÜ: gerçek bir satır alt sınırı MANTIKEN özet
+      // metninin BAŞLADIĞI yerin altında (yani y'si daha KÜÇÜK) OLAMAZ —
+      // özet her zaman tablodan SONRA (sayfada daha aşağıda) gelir. Bulunan
+      // çizgi özet metninin üstündeyse (y >= summaryLine.y) güveniyoruz;
+      // değilse bu çizgi özetin İÇİNDE bir yerde demektir, reddedip
+      // anahtar-kelime tahminine düşüyoruz.
+      const summaryLine = items
+        .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
+        .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
+      if (realLastRowBottom !== undefined && (!summaryLine || realLastRowBottom >= summaryLine.y)) {
         lastBound.yBottom = realLastRowBottom;
+      } else if (summaryLine) {
+        lastBound.yBottom = summaryLine.y + 2;
       } else {
-        const summaryLine = items
-          .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
-          .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
-        if (summaryLine) {
-          lastBound.yBottom = summaryLine.y + 2;
-        } else {
-          lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
-        }
+        lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
       }
       rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - (maxRowHeight ?? 40); });
 
