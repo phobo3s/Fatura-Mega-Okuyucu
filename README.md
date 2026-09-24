@@ -62,8 +62,8 @@ atabilirsiniz. Ayrıntı: [Windows entegrasyonu](#windows-entegrasyonu-nasıl-ç
 | **Türetilmiş alanlar** | Tevkifat tutarı ve oranı QR'da olmasa bile `Vergiler Dahil − Ödenecek` üzerinden hesaplanır. |
 | **Dışa aktarma** | Panoya kopyala (Excel'e yapıştırmaya hazır) veya CSV indir. |
 | **Manuel QR işaretleme** | Otomatik bulunamayan karekodu fareyle işaretleyip taratma; belirli bir satırı seçili yöntemle yeniden tarama (⋮ menüsü). |
-| **Kalem tablosu doğrulama** | Fatura içindeki "Sıra No" satır tablosunu (ürün/hizmet kalemleri) pdf.js metin konumlarından ve gerçek çizgi verisinden tespit eder, kalemlerin toplamını karekoddaki "Mal/Hizmet Tutarı" ile karşılaştırır. Tek fatura için 📋 butonu, tüm yüklenen faturalar için "🧾 Kalem Kontrolü (Tümü)" ile toplu tarama. "👁 Görsel Doğrulama" tespit edilen satır/sütun sınırlarını PDF sayfasının üzerine çizerek gösterir. |
-| **Hibrit çizgi algılama** | Tablo satır/sütun çizgileri önce PDF'in **kendi vektör çizim verisinden** (`getOperatorList` + SVG, piksel/renk eşiği gerektirmez) okunur — kenarlıklı (stroke'lu) hücre kutularının kenarları da tanınır. Bir eksende hiçbir çizgi bulunamazsa, o eksen için **piksel-kapsam** yöntemi (renderlenmiş sayfa üzerinde koyuluk taraması) yedek olarak devreye girer. 285+ gerçek faturayla doğrulandı; farklı yazılımların çok çeşitli çizim tarzlarına (ince çizgi, kenarlıklı kutu, çizgisiz) dayanıklı. |
+| **Kalem tablosu doğrulama** | Fatura içindeki "Sıra No" satır tablosunu (ürün/hizmet kalemleri) pdf.js metin konumlarından ve gerçek çizgi verisinden tespit eder, kalemlerin toplamını karekoddaki "Mal/Hizmet Tutarı" ile karşılaştırır. Tek fatura için 📋 butonu, tüm yüklenen faturalar için "🧾 Kalem Kontrolü (Tümü)" (toplu doğrulama) ve "📊 Kalemleri Toplu Kopyala" (her satırın başına fatura adı eklenmiş TEK bir panoya kopyalama) ile toplu işlem. "👁 Görsel Doğrulama" tespit edilen satır/sütun sınırlarını PDF sayfasının üzerine çizerek gösterir. Ayrıntı: [Kalem tablosu — pratik kullanım](#kalem-tablosu--pratik-kullanım). |
+| **Hibrit çizgi algılama** | Tablo satır/sütun çizgileri önce PDF'in **kendi ham çizim operatörlerinden** (`getOperatorList`, piksel/renk eşiği gerektirmez, SVG ara katmanı yok) okunur — ince ("hairline") çizgiler, kenarlıklı (stroke'lu) hücre kutularının kenarları ve satır-bazlı kısa çizgi parçaları da tanınır. Bir eksende hiçbir çizgi bulunamazsa, o eksen için **piksel-kapsam** yöntemi (renderlenmiş sayfa üzerinde koyuluk taraması) yedek olarak devreye girer. 360+ gerçek faturayla doğrulandı; farklı yazılımların çok çeşitli çizim tarzlarına (ince çizgi, kenarlıklı kutu, çizgisiz) dayanıklı. |
 
 ---
 
@@ -113,6 +113,45 @@ kendi sütunlarında gösterilir.
 
 ---
 
+## Kalem tablosu — pratik kullanım
+
+Fatura içindeki ürün/hizmet satırlarını ("Sıra No" tablosu) ayrıca inceleyip
+dışa aktarmak için:
+
+- **Tek fatura:** satırdaki 📋 ikonuna tıklayıp "Fatura Kalemleri" penceresini
+  açın. **👁 Görsel Doğrulama** tespit edilen satır/sütun sınırlarını PDF
+  sayfasının üzerine çizer (turuncu = başlık bandı, yeşil = satırlar, mavi =
+  sütun sınırları) — algoritmanın ne "gördüğünü" gözle kontrol etmek için.
+  **📋 Panoya Kopyala** o faturanın kalemlerini Excel/Sheets'e yapıştırmaya
+  hazır hale getirir.
+- **Tüm yüklenen faturalar:**
+  - **🧾 Kalem Kontrolü (Tümü)** her faturanın kalem toplamını Mal/Hizmet
+    Tutarı ile karşılaştırıp sonucu tabloya (✓/⚠) yazar.
+  - **📊 Kalemleri Toplu Kopyala** yüklenen TÜM faturaların kalem satırlarını,
+    her satırın başına fatura adı eklenmiş halde TEK bir panoya kopyalar —
+    Excel'e yapıştırıp fatura adına göre filtreleyebilirsiniz. Vendor'lar
+    arası sütun şeması (sayısı/anlamı) farklı olabildiği için, şema
+    değiştiğinde başlık satırı otomatik tekrarlanır; kalem tablosu
+    bulunamayan faturalar da sessizce atlanmaz, "— kalem tablosu bulunamadı —"
+    satırıyla dökümde görünür kalır.
+- **Bir fatura "Bulunamadı" çıkıyorsa:** genelde tablo başlığı "Sıra"/
+  "Sıra No" ya da "EAN" dışında bir kelime kullanıyordur (ör. bazı ithalat/
+  yurt dışı faturalarında sade "No"). Sol paneldeki **regex kuralları
+  kartının altında**, "📋 Kalem Tablosu Çapa Kelimeleri" alanına o kelimeyi
+  ekleyip **Çapa Kelimelerini Kaydet**'e basın (birden fazla kelimeyi
+  noktalı virgülle ayırın: `No; Poz No`). Bu ayar sadece o kelimeyi
+  eklediğiniz sürece geçerli — belirli bir vendor'la çalışırken geçici
+  olarak ekleyip işiniz bitince kutuyu boşaltıp tekrar kaydederek
+  kaldırabilirsiniz. Ayar tarayıcının `localStorage`'ında kalıcıdır (dosya
+  olarak dışa/içe aktarılmaz, regex kurallarının aksine).
+  **Dikkat:** eklediğiniz kelime ne kadar genel olursa (ör. tek başına
+  "No"), sayfadaki ilgisiz bir etikete (ör. "Fatura No") yanlışlıkla
+  kilitlenme riski o kadar artar — sadece kendi faturalarınızda net olarak
+  gördüğünüz, emin olduğunuz kelimeleri ekleyin. Varsayılan olarak bu alan
+  **boştur** ve hiçbir faturayı etkilemez.
+
+---
+
 ## Windows entegrasyonu nasıl çalışır
 
 `fatura_mega_okuyucu.iss` kurulumu üç şey yapar:
@@ -158,12 +197,16 @@ girmez (`.gitignore`). Uygulama bu dosyalar yokken de sorunsuz açılır
   davranışı farklı olabilir.
 - **Kalem tablosu doğrulama her faturada çalışmaz:** "Sıra No" (veya market/
   toptancı fişlerinde EAN barkod) kavramı hiç olmayan bazı belge türlerinde
-  (GSM/internet hat detaylı telekom faturaları gibi) veya metin katmanı
-  olmayan taranmış PDF'lerde kalem tablosu bulunamaz — bu durumda
-  "Bulunamadı" gösterilir, ana QR/regex okuması bundan etkilenmez. Bazı
-  vendor'larda kalem toplamının karekoddaki "Mal/Hizmet Tutarı" ile birebir
-  eşleşmemesi (iskonto öncesi/sonrası veya KDV dahil/hariç fiyatlandırma
-  farkı gibi) gerçek bir muhasebe nüansı olabilir, illa hata anlamına gelmez.
+  (GSM/internet hat detaylı telekom faturaları, "No" gibi farklı bir başlık
+  kullanan bazı ithalat faturaları gibi) veya metin katmanı olmayan
+  taranmış PDF'lerde kalem tablosu bulunamaz — bu durumda "Bulunamadı"
+  gösterilir, ana QR/regex okuması bundan etkilenmez. "Sıra"/"Sıra No"/"EAN"
+  dışında bir başlık kullanan faturalar için
+  [Kalem Tablosu Çapa Kelimeleri](#kalem-tablosu--pratik-kullanım) ayarına
+  o kelimeyi ekleyebilirsiniz. Bazı vendor'larda kalem toplamının
+  karekoddaki "Mal/Hizmet Tutarı" ile birebir eşleşmemesi (iskonto öncesi/
+  sonrası veya KDV dahil/hariç fiyatlandırma farkı gibi) gerçek bir
+  muhasebe nüansı olabilir, illa hata anlamına gelmez.
 - **Kalem tablosu, e-SMM (Serbest Meslek Makbuzu) için tasarlanmadı:**
   Özellik "Sıra No" tablolu **e-Fatura** için geliştirilip test edildi.
   e-SMM makbuzlarının tablo yapısı tamamen farklı (Brüt Ücret / Net Ücret /
