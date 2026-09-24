@@ -186,6 +186,14 @@
       <p style="font-size:10.5px; color:var(--text-muted); margin-top:6px;">
         "Dışa Aktar" o an ekranda görünen kural setini indirir; uygulama klasörüne koyarsanız (e-Fatura seti için <code>mega_config.json</code> adıyla) bir sonraki açılışta varsayılan olarak yüklenir.
       </p>
+
+      <hr style="margin:14px 0; border:none; border-top:1px solid var(--border-color);">
+      <p style="font-size:12px; font-weight:600; margin-bottom:6px;">📋 Kalem Tablosu Çapa Kelimeleri</p>
+      <p style="font-size:10.5px; color:var(--text-muted); margin-bottom:6px;">
+        Kalem tablosu normalde "Sıra"/"Sıra No" ya da "EAN" başlığını arar. Bazı vendor'lar farklı bir kelime kullanır (ör. "No"). Bunlar bulunamazsa sırayla denenecek İLAVE kelimeleri buraya noktalı virgülle ayırarak ekleyin — varsayılan olarak BOŞTUR (hiçbir dosyayı etkilemez). Dikkat: bu tür kelimeler ne kadar genel olursa (ör. tek başına "No") yanlış bir etikete (ör. "Fatura No") yanlışlıkla kilitlenme riski o kadar artar — sadece kendi faturalarınızda gördüğünüz, emin olduğunuz kelimeleri ekleyin.
+      </p>
+      <input type="text" id="lineItemAnchorsInput" placeholder="ör. No; Poz No" style="width:100%; padding:6px; font-size:12px; border:1px solid var(--border-color); border-radius:6px; margin-bottom:8px;">
+      <button class="btn btn-sm btn-secondary" style="width:100%; justify-content:center;" onclick="saveLineItemAnchors()">Çapa Kelimelerini Kaydet</button>
     </div>
   </div>
 
@@ -415,6 +423,7 @@
   let rows = [];
   let lastFiles = []; // en son yüklenen dosyalar - kural değişince yeniden taramak için
   let dynamicColumns = []; // sabit 12 alanın dışında kalan, satırlara göre değişen başlıklar (KDV oranları vb.)
+  let lineItemAnchors = []; // "Sıra"/"Sıra No"/"EAN" bulunamazsa kalem tablosunda sırayla denenecek kullanıcı tanımlı ilave çapa kelimeleri
 
   function fmtNum(n) {
     return n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -922,6 +931,12 @@
     esmmRules = savedEsmm ? JSON.parse(savedEsmm) : defaultEsmmRules;
     renderRulesUI();
 
+    // Kalem tablosu ilave çapa kelimeleri — varsayılan BOŞ (hiçbir dosyayı
+    // etkilemez), sadece kullanıcı kendi vendor'u için ekleyince devreye girer.
+    const savedAnchors = localStorage.getItem('fatura_mega_line_item_anchors');
+    lineItemAnchors = savedAnchors ? JSON.parse(savedAnchors) : [];
+    document.getElementById('lineItemAnchorsInput').value = lineItemAnchors.join('; ');
+
     // "Gönder" menüsünden dosyalarla açıldıysa (mega_launcher.bat ?auto=1 ile
     // temp_files.js'i üretti) dosyaları otomatik yükleyip taramayı başlat.
     // NOT (denendi, geri alindi): dosya yollarını fetch()/XHR ile doğrudan
@@ -980,6 +995,18 @@
     } else {
       alert('Kurallar kaydedildi! Yüklenen faturalarda bu ayarlar geçerli olacak.');
     }
+  }
+
+  // Regex kurallarından AYRI, kendi küçük kaydetme akışı — kalem tablosu
+  // QR/regex alan çıkarımıyla ilgisiz bir özellik olduğu için `saveConfig()`
+  // ile (o, regex'e düşmüş satırları anında yeniden tarıyor) karıştırmıyoruz.
+  function saveLineItemAnchors() {
+    const raw = document.getElementById('lineItemAnchorsInput').value;
+    lineItemAnchors = raw.split(';').map(s => s.trim()).filter(Boolean);
+    localStorage.setItem('fatura_mega_line_item_anchors', JSON.stringify(lineItemAnchors));
+    alert(lineItemAnchors.length
+      ? `Kaydedildi! Şu kelimeler artık sırayla denenecek: ${lineItemAnchors.join(', ')}`
+      : 'Kaydedildi! İlave çapa kelimesi yok — sadece "Sıra"/"Sıra No"/"EAN" aranacak.');
   }
 
   // QR ile zaten bulunan satırlara dokunmadan, sadece regex'e düşmüş/bulunamamış
@@ -3107,20 +3134,41 @@
         if (anchor) rowNumberPattern = /^\d+$/;
       }
       // DENENDİ, GERİ ALINDI (VENDOR-P): "Sıra"/"Sıra No"/"EAN" bulunamazsa
-      // tek başına "No" başlığını üçüncü bir çapa olarak deneme fikri —
-      // sadece hemen altında/yanında 1-4 haneli bir sayı var mı diye
-      // doğrulasa bile YETERSİZ kaldı. Tam 285+75 dosyalık regresyonda 3
-      // YANLIŞ POZİTİF üretti: bir belediye vergi makbuzunda "GIB SİCİL NO"
-      // etiketine kilitlenip 21 anlamsız sütun uydurdu, bozuk fontlu bir
-      // noter makbuzunda sum=0 saçma bir tablo üretti, gerçek bir "Sıra No"
-      // tablosu olan bir dosyada ise harfler arası bozuk boşluk yüzünden
-      // ("S ı ra No" gibi — collapseLetterSpacing bunu yakalayamadı çünkü
-      // parçalar eşit uzunlukta değil) doğru çapa yerine yanlış bir "No"ya
+      // tek başına "No" başlığını ÜÇÜNCÜ, HERKESE UYGULANAN bir çapa olarak
+      // otomatik deneme fikri — sadece hemen altında/yanında 1-4 haneli bir
+      // sayı var mı diye doğrulasa bile YETERSİZ kaldı. Tam 285+75 dosyalık
+      // regresyonda 3 YANLIŞ POZİTİF üretti: bir belediye vergi makbuzunda
+      // "GIB SİCİL NO" etiketine kilitlenip 21 anlamsız sütun uydurdu,
+      // bozuk fontlu bir noter makbuzunda sum=0 saçma bir tablo üretti,
+      // gerçek bir "Sıra No" tablosu olan bir dosyada ise harfler arası
+      // bozuk boşluk yüzünden ("S ı ra No" gibi) yanlış bir "No"ya
       // kilitlenip başlıkları tamamen saçmalattı. "No" tek başına aşırı
-      // genel — "1-4 haneli sayı altında var mı" testi rastgele metinde çok
-      // kolay tesadüfen sağlanıyor, güvenilir bir imza DEĞİL. TAMAMEN GERİ
-      // ALINDI. Bu tarz belge türleri (Sıra No hiç yok) bu özelliğin
-      // kapsamı dışında kalmaya devam ediyor.
+      // genel — "altında sayı var mı" testi rastgele metinde çok kolay
+      // tesadüfen sağlanıyor, TÜM kullanıcılar için güvenle otomatikleştirilecek
+      // bir imza DEĞİL.
+      //
+      // ÇÖZÜM: riski koddan KULLANICININ kendi kararına taşıyoruz. Sol
+      // paneldeki "Kalem Tablosu Çapa Kelimeleri" alanına kullanıcı
+      // isterse kendi vendor'u için "No" gibi bir kelime EKLEYEBİLİR
+      // (`lineItemAnchors`, varsayılan BOŞ — hiç dokunulmazsa yukarıdaki
+      // 3 yanlış pozitif riski hiçbir kullanıcıyı etkilemez). Yine de körü
+      // körüne ilk eşleşmeyi almıyoruz — SIRA/EAN'ın aksine, sayfadaki her
+      // adayı sırayla deneyip aynı "hemen altında/yanında gerçek bir sıra
+      // numarası var mı" testini geçen İLKİNİ kabul ediyoruz (aday sayfada
+      // birden fazla yerde geçiyorsa yanlış olanı elemeye çalışan bir
+      // güvenlik ağı — garanti değil, ama körü körüne ilk eşleşmeden iyi).
+      if (!anchor && lineItemAnchors.length) {
+        for (const word of lineItemAnchors) {
+          const target = normTRUpper(word);
+          if (!target) continue;
+          const verified = items
+            .filter(it => normTRUpper(it.str) === target)
+            .find(cand => items.some(it =>
+              it.y <= cand.y + 5 && it.x >= cand.x - 6 && it.x <= cand.x + 40 && /^\d{1,4}$/.test(it.str.trim())
+            ));
+          if (verified) { anchor = verified; rowNumberPattern = /^\d{1,4}$/; break; }
+        }
+      }
       if (!anchor) continue;
 
       // 1. veri satırını İÇERİĞE göre bul (bkz. yukarıdaki yorum, madde 2).
