@@ -724,7 +724,24 @@
     return checks;
   }
 
+  // Karekodsuz satırda regex ile özet kutusu ÇELİŞTİYSE (bkz.
+  // applySummaryTotalsToRegexRow) hangisinin esas alındığını söyler. Sadece
+  // bilgi (sarı ⚠): bir tutarsızlık değil, kaynak seçimi. 360 dosyalık
+  // korpusta regex'in tutturduğu satırlarda hiç çelişki çıkmadı.
+  function checkOzetKaynagi(ctx) {
+    const ov = ctx.row.summaryOverrides || {};
+    const items = Object.entries(ov);
+    if (!items.length) return [];
+    return [{
+      ok: true,
+      info: true,
+      text: 'Karekod yok; regex ile okunan değer faturanın altındaki özet tablosundakinden farklıydı — ÖZET TABLOSU esas alındı: ' +
+        items.map(([label, v]) => `${label}: regex ${v.eski} → özet ${v.yeni}`).join('; ')
+    }];
+  }
+
   const EFATURA_VALIDATORS = [
+    checkOzetKaynagi,
     checkVergiDahilToplam,
     checkOdenecekTutar,
     checkMatrahKdvOdenecek,
@@ -854,13 +871,53 @@
   // çalıştırır, mükerrer fatura kontrolünü ekler ve dinamik sütunları
   // günceller. Tüm satırlar bittikten sonra çağrılmalı (hem sütun listesi hem
   // mükerrer tespiti hepsine bakarak kurulur).
+  // KAREKODSUZ (regex'e düşmüş) e-Fatura satırlarında toplamları özet
+  // kutusundan alır. Öncelik: karekod > özet kutusu > regex. Gerekçe: regex
+  // kuralları düzenlenebilir/vendor'a kırılgan bir metin deseni; özet ise
+  // ETİKETLE (aynı satırdaki en sağ tutar) okunuyor. Regex bir toplamı boş
+  // bıraktıysa doldurulur; regex FARKLI bir değer okuduysa özet esas alınır ve
+  // `row.summaryOverrides`'a (etiket -> {eski, yeni}) not düşülür — doğrulama
+  // kutusu bunu bilgi olarak gösterir (bkz. checkOzetKaynagi). İDEMPOTENT:
+  // finalizeRows her çağrıldığında tekrar çalışır; değerler zaten eşitse
+  // dokunmaz, önceki not korunur (satır yeniden taranırsa satır nesnesi
+  // sıfırdan kurulduğu için not da sıfırlanır).
+  // Kimlik alanları (fatura no, tarih, VKN...) özetten gelemez — regex'te kalır.
+  function applySummaryTotalsToRegexRow(row, s) {
+    row.fields = row.fields || {};
+    row.extraFields = row.extraFields || {};
+    const ov = row.summaryOverrides = row.summaryOverrides || {};
+    const put = (label, cur, sv, write) => {
+      const curNum = parseTurkishNumber(cur);
+      if (curNum !== null && Math.abs(curNum - sv) <= 0.005) return; // aynı değer
+      if (curNum !== null) ov[label] = { eski: cur, yeni: fmtNum(sv) };
+      write(fmtNum(sv));
+    };
+    [['malHizmet', 'Mal/Hizmet Tutarı'], ['vergiDahil', 'Vergiler Dahil Tutar'], ['odenecek', 'Ödenecek Tutar']].forEach(([id, label]) => {
+      if (s[id] !== undefined) put(label, row.fields[id], s[id], v => { row.fields[id] = v; });
+    });
+    Object.entries(s.kdv || {}).forEach(([rate, val]) => {
+      const key = `Hesaplanan KDV (%${String(rate).replace('.', ',')})`;
+      // Regex aynı kavramı başka büyük/küçük harfle ("HESAPLANAN KDV (%20)")
+      // yakalamış olabilir (uydurma testte bulundu): aynı anahtarı bul, yoksa
+      // ÇİFT sütun açılır ve KDV iki kez sayılıp yanlış kırmızı ✗ çıkar.
+      const exist = Object.keys(row.extraFields).find(k => foldTRKey(k) === foldTRKey(key)) || key;
+      put(key, row.extraFields[exist], val, v => { row.extraFields[exist] = v; });
+    });
+    // Para birimi: sadece boşsa (regex "TL", karekod "TRY" yazıyor — çakışma sayılmaz).
+    if (s.paraBirimi && !row.fields.paraBirimi) row.fields.paraBirimi = s.paraBirimi;
+  }
+
   // Özet kutusundan (row.summary, bkz. extractSummaryBlock) gelen değerleri
-  // satırın sütunlarına yansıtır. Sadece EKLEMELİ: QR'ın verdiği hiçbir değere
-  // dokunmaz. İskonto sütunu SADECE en az bir faturada sıfırdan farklı iskonto
-  // varsa görünür (dinamik sütun mekanizması boş sütunu zaten göstermiyor).
+  // satırın sütunlarına yansıtır. KAREKODLU satırlarda sadece EKLEMELİ: QR'ın
+  // verdiği hiçbir değere dokunmaz (bkz. applySummaryTotalsToRegexRow —
+  // karekodsuzda özet regex'ten ÖNCELİKLİ). İskonto sütunu SADECE en az bir
+  // faturada sıfırdan farklı iskonto varsa görünür (dinamik sütun mekanizması
+  // boş sütunu zaten göstermiyor).
   function applySummaryFields(row) {
     const s = row.summary;
-    if (!s || s.iskonto === undefined) return;
+    if (!s) return;
+    if (row.source === 'Regex' && row.docType !== 'ESMM') applySummaryTotalsToRegexRow(row, s);
+    if (s.iskonto === undefined) return;
     row.extraFields = row.extraFields || {};
     delete row.extraFields['Olası İskonto']; // basılı gerçek değer varsa tahmin eskir
     if (s.iskonto > VALIDATION_EPS) row.extraFields['Toplam İskonto'] = fmtNum(s.iskonto);
@@ -1699,8 +1756,10 @@
         } else {
           row = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'QR bulunamadı (regex kapalı).' };
         }
-        // Faturanın altındaki özet kutusu (iskonto vb.) — QR/regex sonucunu
-        // ASLA ezmez, sadece ek bilgi; hata verirse sessizce atlanır.
+        // Faturanın altındaki özet kutusu (iskonto, toplamlar...) — karekodlu
+        // satırda QR sonucunu ASLA ezmez (sadece ek bilgi); karekodsuz (Regex)
+        // satırda toplamlar özetten alınır (bkz. applySummaryTotalsToRegexRow).
+        // Hata verirse sessizce atlanır.
         if (row.source !== 'Bulunamadı' && row.docType !== 'ESMM') {
           try { row.summary = await extractSummaryBlock(pdf); } catch (e) { row.summary = undefined; }
         }
@@ -2248,17 +2307,28 @@
     return lines;
   }
 
-  // Bir satırı {label, valueStr} olarak ayırır: EN SAĞDAKİ tutar değer, solda
-  // kalan her şey etiket. Tutardan sonra ayrı bir parça olarak gelen "TL" gibi
-  // birim atılır. Tutarla bitmeyen satır (ör. başlık, açıklama) null döner.
+  // Bir satırı {label, valueStr, unit} olarak ayırır: EN SAĞDAKİ tutar değer,
+  // solda kalan her şey etiket. Tutardan sonra ayrı bir parça olarak gelen "TL"
+  // gibi birim değerden atılır ama `unit` olarak (ISO: TL->TRY) döner — özetten
+  // Para Birimi de okunabilsin diye. Tutarla bitmeyen satır (ör. başlık,
+  // açıklama) null döner.
+  function normalizeCurrencyUnit(u) {
+    const x = u.toUpperCase();
+    return x === 'TL' ? 'TRY' : x === '€' ? 'EUR' : x === '$' ? 'USD' : x;
+  }
   function splitLabelValue(lineItems) {
     const its = lineItems.map(i => ({ s: i.s.trim(), x: i.x, w: i.w || 0, h: i.h || 0 })).filter(i => i.s);
-    if (its.length && SUMMARY_UNIT_ONLY_RE.test(its[its.length - 1].s)) its.pop();
+    let unit = null;
+    if (its.length && SUMMARY_UNIT_ONLY_RE.test(its[its.length - 1].s)) unit = its.pop().s;
     if (its.length < 2) return null;
     const last = its[its.length - 1];
     if (!SUMMARY_AMOUNT_RE.test(last.s)) return null;
+    if (!unit) { // birim tutara bitişik olabilir ("13.810,00TL")
+      const um = last.s.match(new RegExp('(' + SUMMARY_UNIT + ')$', 'i'));
+      if (um) unit = um[1];
+    }
     const labelItems = its.slice(0, -1);
-    return { label: labelItems.map(i => i.s).join(' '), valueStr: last.s, labelItems, valueItem: last };
+    return { label: labelItems.map(i => i.s).join(' '), valueStr: last.s, unit: unit ? normalizeCurrencyUnit(unit) : null, labelItems, valueItem: last };
   }
 
   // Etiket ANAHTARI -> alan eşlemesi. `rated:true` olanlar oran bazında
@@ -2275,9 +2345,20 @@
 
   // PDF'in TÜM sayfalarındaki metinden özet kutusu değerlerini çıkarır:
   // { iskonto, yuvarlama, malHizmet, vergiDahil, odenecek: number,
-  //   kdv: {oran: number}, kdvTevkifat: {oran: number} } — bulunmayan alan yok.
+  //   kdv: {oran: number}, kdvTevkifat: {oran: number},
+  //   paraBirimi: 'TRY'|'EUR'|... (seçilen satırların birimi) } — bulunmayan alan yok.
   // Aynı alan birden çok yerde geçerse SONUNCUSU (sayfa sırasında/aşağıda) kazanır:
   // özet her zaman faturanın en altında, tablodan sonra gelir.
+  //
+  // YABANCI PARA BİRİMLİ FATURALAR (gerçek örnekle bulundu — karekodsuz satırda
+  // özeti regex'in önüne alırken sonucu karekod gerçeğiyle kıyaslayınca): özet
+  // İKİ BLOK basıyor — önce fatura para biriminde (EUR/USD...), altında TL
+  // karşılığı. "Sonuncusu kazanır" TL karşılığını seçip tutarları ~50 kat
+  // büyütüyordu. Bu yüzden önce belgenin birimi belirlenir: TRY dışı bir birim
+  // görülüyorsa fatura O birimdedir, TL blok sadece karşılıktır; her alan için
+  // YALNIZCA o birimdeki satır alınır (o birimde satırı olmayan alan — ör. sadece
+  // TL bloğunda basılan iskonto — atlanır, birim karıştırılmaz). Birim değerin
+  // yanındaki "EUR"/"TL" parçasından ya da etiketteki "(TL)" ekinden okunur.
   //
   // `lines`: kazanan HER satırın sayfadaki yeri (PDF koordinatı, y yukarı):
   // { id, rate?, page, y, h, value, label, labelBox:{x0,x1}, valueBox:{x0,x1} }
@@ -2285,8 +2366,7 @@
   // (bkz. toggleLineItemVisual). Değer alanlarıyla (iskonto, malHizmet...) aynı
   // nesnede durur ama sadece görselleştirme okur.
   async function extractSummaryBlock(pdf) {
-    const found = {};
-    const lineRecs = {};
+    const cands = []; // tarama sırasıyla (sayfa, yukarıdan aşağı) TÜM aday satırlar
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const tc = await page.getTextContent();
@@ -2306,19 +2386,45 @@
         if (def.rated) {
           rate = rateM ? parseFloat(rateM[1].replace(',', '.')) : null;
           if (rate === null || isNaN(rate)) continue;
-          (found[def.id] = found[def.id] || {})[rate] = value;
-        } else {
-          found[def.id] = value;
         }
+        const unit = lv.unit || (/TL$/.test(key) ? 'TRY' : null);
         const span = its => ({ x0: Math.min(...its.map(i => i.x)), x1: Math.max(...its.map(i => i.x + (i.w || 0))) });
-        lineRecs[def.id + (def.rated ? '@' + rate : '')] = {
-          id: def.id, rate, page: p, y: line.y, value, label: lv.label,
-          h: Math.max(...line.items.map(i => i.h || 0)) || 9,
-          labelBox: span(lv.labelItems), valueBox: span([lv.valueItem])
-        };
+        cands.push({
+          id: def.id, rated: !!def.rated, rate, unit, value,
+          rec: {
+            id: def.id, rate, page: p, y: line.y, value, label: lv.label,
+            h: Math.max(...line.items.map(i => i.h || 0)) || 9,
+            labelBox: span(lv.labelItems), valueBox: span([lv.valueItem])
+          }
+        });
       }
     }
-    found.lines = Object.values(lineRecs);
+
+    // Belge birimi: TRY dışı en sık görülen birim (yoksa null = TL/birimsiz belge).
+    const foreign = {};
+    cands.forEach(c => { if (c.unit && c.unit !== 'TRY') foreign[c.unit] = (foreign[c.unit] || 0) + 1; });
+    const docUnit = (Object.entries(foreign).sort((a, b) => b[1] - a[1])[0] || [null])[0];
+
+    const byKey = {};
+    cands.forEach(c => (byKey[c.id + (c.rated ? '@' + c.rate : '')] = byKey[c.id + (c.rated ? '@' + c.rate : '')] || []).push(c));
+    const found = {};
+    const lineRecs = [];
+    const unitCounts = {};
+    Object.values(byKey).forEach(list => {
+      // Yabancı belgede: belge birimindeki SON satır; yoksa birimi hiç basılmamış SON satır;
+      // o da yoksa (sadece TL karşılığı var) alan atlanır. Diğerlerinde: SON satır.
+      const pick = docUnit
+        ? (list.filter(c => c.unit === docUnit).pop() || list.filter(c => c.unit === null).pop())
+        : list[list.length - 1];
+      if (!pick) return;
+      if (pick.rated) (found[pick.id] = found[pick.id] || {})[pick.rate] = pick.value;
+      else found[pick.id] = pick.value;
+      if (pick.unit) unitCounts[pick.unit] = (unitCounts[pick.unit] || 0) + 1;
+      lineRecs.push(pick.rec);
+    });
+    const topUnit = Object.entries(unitCounts).sort((a, b) => b[1] - a[1])[0];
+    if (topUnit) found.paraBirimi = topUnit[0];
+    found.lines = lineRecs;
     return found;
   }
 
