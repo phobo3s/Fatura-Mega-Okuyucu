@@ -2285,6 +2285,20 @@
   // İskonto / Hesaplanan KDV / Vergiler Dahil Toplam Tutar / Ödenecek Tutar"
   // tablosu
   // ==========================================================================
+  // Fatura üç öğeden oluşur: KİMLİK (fatura no, tarih, VKN... — karekod > regex),
+  // KALEMLER TABLOSU (detectLineItemTable) ve bu ÖZET KUTUSU. Toplamlar için
+  // öncelik: karekod > özet kutusu > regex (yedek).
+  //
+  // BU MODÜLÜN PARÇALARI (yukarıdan aşağıya okuyun; ayrıntılı anlatım ve
+  // örnekler: docs/ozet-kutusu.md):
+  //   1. Okuma yardımcıları .... foldTRKey, groupItemsIntoLines, splitLabelValue
+  //   2. Etiket kataloğu ....... SUMMARY_FIELDS (tek anlamlı), SUMMARY_AMBIGUOUS_LABELS
+  //   3. Okuyucu ............... extractSummaryBlock (satırları bulur, para birimini ayırır)
+  //   4. Bağıntılar ............ resolveAmbiguousAmounts (çift anlamlı sayıları hesapla çözer)
+  //   Modülün geri kalanı başka bölümlerde: applySummaryFields /
+  //   applySummaryTotalsToRegexRow (finalizeRows'un yanında, satıra uygular),
+  //   checkOzetKaynagi (doğrulayıcılar), drawSummaryLine (kalem modalı, görsel).
+  //
   // Ürün kalemi tablosuyla AYNI mantık (satırlar y'ye, sütunlar x'e göre
   // keşfedilir) ama iki fark var: başlık satırı YOK ve çapa "Sıra No" değil,
   // bilinen ETİKET kelimeleri. Bu yüzden regresyona çok hassas olan
@@ -2352,22 +2366,46 @@
     return { label: labelItems.map(i => i.s).join(' '), valueStr: last.s, unit: unit ? normalizeCurrencyUnit(unit) : null, labelItems, valueItem: last };
   }
 
-  // Etiket ANAHTARI -> alan eşlemesi. `rated:true` olanlar oran bazında
+  // --------------------------------------------------------------------------
+  // 2. ETİKET KATALOĞU
+  // --------------------------------------------------------------------------
+  // Anahtar = foldTRKey(etiket) (yukarıya bakın). Katalog 360 dosyalık
+  // korpustan ve karekodun GERÇEK tutarlarıyla karşılaştırılarak çıkarıldı.
+
+  // 2a. TEK ANLAMLI etiketler: etiket -> alan. `rated:true` olanlar oran bazında
   // ("Hesaplanan KDV(%20)") tekrarlanır. Sıra önemli: daha özel olan önce.
   const SUMMARY_FIELDS = [
     { id: 'iskonto',     re: /^(TOPLAM)?(ISKONTO|INDIRIM)(TUTARI)?(TL)?$/ },
     { id: 'yuvarlama',   re: /^(FATURA)?YUVARLAMA(FARKI)?(TL)?$/ },
     { id: 'malHizmet',   re: /^MALHIZMETTOPLAMTUTARI(TL)?$/ },
-    { id: 'vergiDahil',  re: /^(VERGILER|KDV)DAHILTOPLAMTUTAR(TL)?$/ },
-    { id: 'odenecek',    re: /^ODENECEKTUTAR(TL)?$/ },
+    { id: 'vergiDahil',  re: /^((VERGILER|KDV)DAHILTOPLAMTUTAR|TOPLAMFATURATUTARI)(TL)?$/ },
+    { id: 'odenecek',    re: /^ODENECEK(TUTAR|TOPLAM)(TL)?$/ },
     { id: 'kdvTevkifat', re: /^HESAPLANANKDVTEVKIFAT(TL)?$/, rated: true },
-    { id: 'kdv',         re: /^HESAPLANANKDV(GERCEK)?(TL)?$/, rated: true }
+    { id: 'kdv',         re: /^HESAPLANANKDV(GERCEK)?(TL)?$/, rated: true },
+    { id: 'matrah',      re: /^KDVMATRAHI(TL)?$/, rated: true } // "KDV Matrahı (%20)": bağıntılar için çıpa
   ];
 
+  // 2b. ÇİFT / BELİRSİZ ANLAMLI etiketler: aynı sözcük farklı yazılımlarda
+  // farklı şey demek (ör. "Toplam Tutar" bir yerde KDV HARİÇ, başka yerde KDV
+  // DAHİL — korpusta 13 faturada 10 / 3). Etikete bakarak rol VERİLMEZ; bu
+  // satırların sadece tutarı "aday" olarak alınır, rolü 4. bölümdeki
+  // bağıntılarla çözülür (resolveAmbiguousAmounts). Hiçbir bağıntı tutmazsa
+  // alan BOŞ kalır — yanlış dolu tutar, boş tutardan kötüdür.
+  const SUMMARY_AMBIGUOUS_LABELS = [
+    /^TOPLAMTUTAR(TL)?$/, /^ARATOPLAM(TL)?$/, /^VERGIHARICTUTAR(TL)?$/,
+    /^KDVMATRAHTUTARI(TL)?$/, /^NETTUTAR(TL)?$/, /^SATISTUTARI(TL)?$/, /^GENELTOPLAM(TL)?$/
+  ];
+
+  // --------------------------------------------------------------------------
+  // 3. OKUYUCU
+  // --------------------------------------------------------------------------
   // PDF'in TÜM sayfalarındaki metinden özet kutusu değerlerini çıkarır:
   // { iskonto, yuvarlama, malHizmet, vergiDahil, odenecek: number,
-  //   kdv: {oran: number}, kdvTevkifat: {oran: number},
-  //   paraBirimi: 'TRY'|'EUR'|... (seçilen satırların birimi) } — bulunmayan alan yok.
+  //   kdv: {oran: number}, kdvTevkifat: {oran: number}, matrah: {oran: number},
+  //   kdvToplam: number (oransız basılı tek KDV satırı),
+  //   paraBirimi: 'TRY'|'EUR'|... (seçilen satırların birimi),
+  //   kanit: {alan: 'bağıntı açıklaması'} (çift anlamlı etiketten çözülenler) }
+  // — bulunmayan alan yok.
   // Aynı alan birden çok yerde geçerse SONUNCUSU (sayfa sırasında/aşağıda) kazanır:
   // özet her zaman faturanın en altında, tablodan sonra gelir.
   //
@@ -2387,7 +2425,8 @@
   // (bkz. toggleLineItemVisual). Değer alanlarıyla (iskonto, malHizmet...) aynı
   // nesnede durur ama sadece görselleştirme okur.
   async function extractSummaryBlock(pdf) {
-    const cands = []; // tarama sırasıyla (sayfa, yukarıdan aşağı) TÜM aday satırlar
+    const cands = [];    // tarama sırasıyla (sayfa, yukarıdan aşağı) tek anlamlı aday satırlar
+    const ambCands = []; // çift anlamlı etiketli satırlar (rolü 4. bölümde çözülür)
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const tc = await page.getTextContent();
@@ -2400,24 +2439,32 @@
         const rateM = lv.label.match(/%\s*([\d.,]+)/);
         const key = foldTRKey(lv.label.replace(/%\s*[\d.,]+/g, ''));
         const def = SUMMARY_FIELDS.find(f => f.re.test(key));
-        if (!def) continue;
+        const ambiguous = !def && SUMMARY_AMBIGUOUS_LABELS.some(re => re.test(key));
+        if (!def && !ambiguous) continue;
         const value = parseTurkishNumber(lv.valueStr);
         if (value === null) continue;
+        let id = ambiguous ? null : def.id;
         let rate;
-        if (def.rated) {
+        if (def && def.rated) {
           rate = rateM ? parseFloat(rateM[1].replace(',', '.')) : null;
-          if (rate === null || isNaN(rate)) continue;
+          if (rate === null || isNaN(rate)) {
+            // Oransız basılı tek KDV satırı ("Hesaplanan KDV: 979,69") oranlı
+            // sütuna yazılamaz ama bağıntılar için toplam KDV olarak lazım.
+            if (def.id !== 'kdv') continue;
+            id = 'kdvToplam';
+          }
         }
         const unit = lv.unit || (/TL$/.test(key) ? 'TRY' : null);
         const span = its => ({ x0: Math.min(...its.map(i => i.x)), x1: Math.max(...its.map(i => i.x + (i.w || 0))) });
-        cands.push({
-          id: def.id, rated: !!def.rated, rate, unit, value,
+        const cand = {
+          id, rated: !!(def && def.rated) && id !== 'kdvToplam', rate, unit, value, key,
           rec: {
-            id: def.id, rate, page: p, y: line.y, value, label: lv.label,
+            id, rate, page: p, y: line.y, value, label: lv.label,
             h: Math.max(...line.items.map(i => i.h || 0)) || 9,
             labelBox: span(lv.labelItems), valueBox: span([lv.valueItem])
           }
-        });
+        };
+        (ambiguous ? ambCands : cands).push(cand);
       }
     }
 
@@ -2426,27 +2473,102 @@
     cands.forEach(c => { if (c.unit && c.unit !== 'TRY') foreign[c.unit] = (foreign[c.unit] || 0) + 1; });
     const docUnit = (Object.entries(foreign).sort((a, b) => b[1] - a[1])[0] || [null])[0];
 
-    const byKey = {};
-    cands.forEach(c => (byKey[c.id + (c.rated ? '@' + c.rate : '')] = byKey[c.id + (c.rated ? '@' + c.rate : '')] || []).push(c));
+    // Aynı alan/etikete ait adaylar arasından SON satırı seçer. Yabancı belgede:
+    // belge birimindeki SON satır; yoksa birimi hiç basılmamış SON satır; o da
+    // yoksa (sadece TL karşılığı var) null (alan atlanır). Diğerlerinde: SON satır.
+    const pickByUnit = list => docUnit
+      ? (list.filter(c => c.unit === docUnit).pop() || list.filter(c => c.unit === null).pop())
+      : list[list.length - 1];
+    const groupBy = (arr, keyFn) => arr.reduce((m, c) => ((m[keyFn(c)] = m[keyFn(c)] || []).push(c), m), {});
+
     const found = {};
     const lineRecs = [];
     const unitCounts = {};
-    Object.values(byKey).forEach(list => {
-      // Yabancı belgede: belge birimindeki SON satır; yoksa birimi hiç basılmamış SON satır;
-      // o da yoksa (sadece TL karşılığı var) alan atlanır. Diğerlerinde: SON satır.
-      const pick = docUnit
-        ? (list.filter(c => c.unit === docUnit).pop() || list.filter(c => c.unit === null).pop())
-        : list[list.length - 1];
+    Object.values(groupBy(cands, c => c.id + (c.rated ? '@' + c.rate : ''))).forEach(list => {
+      const pick = pickByUnit(list);
       if (!pick) return;
       if (pick.rated) (found[pick.id] = found[pick.id] || {})[pick.rate] = pick.value;
       else found[pick.id] = pick.value;
       if (pick.unit) unitCounts[pick.unit] = (unitCounts[pick.unit] || 0) + 1;
       lineRecs.push(pick.rec);
     });
+
+    // Çift anlamlı etiketler: etiket başına SON satır -> bağıntılarla rol ver (4. bölüm)
+    const ambPicks = Object.values(groupBy(ambCands, c => c.key)).map(pickByUnit).filter(Boolean)
+      .sort((a, b) => a.rec.page - b.rec.page || b.rec.y - a.rec.y); // sayfa/yukarıdan aşağı sırası
+    resolveAmbiguousAmounts(found, ambPicks).forEach(a => lineRecs.push(a.rec));
+
     const topUnit = Object.entries(unitCounts).sort((a, b) => b[1] - a[1])[0];
     if (topUnit) found.paraBirimi = topUnit[0];
     found.lines = lineRecs;
     return found;
+  }
+
+  // --------------------------------------------------------------------------
+  // 4. BAĞINTILAR — çift anlamlı sayıların rolünü HESAPLA çözer
+  // --------------------------------------------------------------------------
+  // Karekod gerekmez: bağıntılar faturanın KENDİ basılı sayıları arasında.
+  //   B1  Matrah         = Mal/Hizmet − İskonto
+  //   B2  KDV(oran)      = Matrah × oran          =>  Matrah = Σ KDV ÷ oran
+  //   B3  Vergiler Dahil = Matrah + KDV
+  // (Ödenecek = Vergiler Dahil − Tevkifat bağıntısı BURADA kullanılmıyor:
+  // "Vergiler Dahil" bazı yazılımlarda tevkifat düşülmüş basılıyor, belirsiz.)
+  //
+  // Yöntem: kesin etiketlerden (KDV + oran, basılı matrah, Vergiler Dahil)
+  // BEKLENEN matrah / Vergiler Dahil değerleri türetilir; her aday tutar bu
+  // beklenenlerden biriyle eşleşiyorsa o rolü alır:
+  //   aday = beklenen matrah            -> KDV HARİÇ tutar. İskonto yoksa Mal/Hizmet
+  //                                        de odur; iskonto varsa bu MATRAH'tır
+  //                                        (Mal/Hizmet'i tahmin ETMEYİZ, boş kalır).
+  //   aday = beklenen matrah + iskonto  -> Mal/Hizmet (iskonto öncesi brüt)
+  //   aday = beklenen Vergiler Dahil    -> Vergiler Dahil
+  //   hiçbiri                           -> ROL VERİLMEZ (alan boş kalır)
+  // Kesin etiketle zaten bulunmuş alanın üzerine YAZILMAZ.
+  // Döner: atanan alanların listesi [{role, rec}] — rec, görsel doğrulamada çizilir
+  // (`via`: hangi bağıntıyla çözüldüğünün insan-okur açıklaması). `found`a da
+  // alan ve `found.kanit[alan]` eklenir.
+  function resolveAmbiguousAmounts(found, ambPicks) {
+    if (!ambPicks.length) return [];
+    const eq = (a, b) => Math.abs(a - b) <= VALIDATION_EPS;
+    const sum = obj => Object.values(obj || {}).reduce((s, v) => s + v, 0);
+
+    // --- kesin etiketlerden bilinenler ---
+    const kdvRated = found.kdv || {};
+    const kdv = Object.keys(kdvRated).length ? sum(kdvRated) : found.kdvToplam;      // Σ KDV
+    const matrahFromKdv = Object.keys(kdvRated).length && Object.keys(kdvRated).every(r => parseFloat(r) > 0)
+      ? Object.entries(kdvRated).reduce((s, [r, v]) => s + v / (parseFloat(r) / 100), 0) : null; // B2
+    const isk = found.iskonto || 0;
+    const hasKdv = kdv !== undefined;
+
+    // --- beklenen matrah kaynakları: { v: değer, expr: insan-okur ifade } ---
+    const expMatrah = [];
+    if (found.matrah) expMatrah.push({ v: sum(found.matrah), expr: 'basılı KDV Matrahları toplamı' });
+    if (hasKdv && found.vergiDahil !== undefined) expMatrah.push({ v: found.vergiDahil - kdv, expr: `Vergiler Dahil (${fmtNum(found.vergiDahil)}) − KDV (${fmtNum(kdv)})` });
+    if (matrahFromKdv !== null) expMatrah.push({ v: matrahFromKdv, expr: `KDV (${fmtNum(kdv)}) ÷ oran` });
+    // --- beklenen Vergiler Dahil kaynakları ---
+    const expVd = [];
+    if (found.matrah && hasKdv) expVd.push({ v: sum(found.matrah) + kdv, expr: `basılı Matrah + KDV (${fmtNum(kdv)})` });
+    if (matrahFromKdv !== null) expVd.push({ v: matrahFromKdv + kdv, expr: `Matrah (KDV ÷ oran) + KDV (${fmtNum(kdv)})` });
+
+    found.kanit = found.kanit || {};
+    const assigned = [];
+    const assign = (role, pick, expr) => {
+      if (found[role] !== undefined) return;            // kesin etiket önceliklidir
+      found[role] = pick.value;
+      const kanit = `"${pick.rec.label}" (${fmtNum(pick.value)}) = ${expr}`;
+      found.kanit[role] = kanit;
+      assigned.push({ role, rec: { ...pick.rec, id: role, via: kanit } });
+    };
+    ambPicks.forEach(pick => {
+      const x = pick.value;
+      const matrah = expMatrah.find(e => eq(x, e.v));
+      if (matrah) { if (isk <= VALIDATION_EPS) assign('malHizmet', pick, matrah.expr); return; }
+      const brut = isk > VALIDATION_EPS && expMatrah.find(e => eq(x, e.v + isk));
+      if (brut) { assign('malHizmet', pick, `${brut.expr} + İskonto (${fmtNum(isk)})`); return; }
+      const vd = expVd.find(e => eq(x, e.v));
+      if (vd) assign('vergiDahil', pick, vd.expr);
+    });
+    return assigned;
   }
 
   // e-SMM metin katmanı e-Fatura'dan tamamen farklı etiketler kullanıyor
@@ -4354,7 +4476,7 @@
     });
   }
 
-  const SUMMARY_TAGS = { iskonto: 'İskonto', yuvarlama: 'Yuvarlama', malHizmet: 'Mal/Hizmet', vergiDahil: 'Vergiler Dahil', odenecek: 'Ödenecek', kdv: 'KDV', kdvTevkifat: 'KDV Tevkifat' };
+  const SUMMARY_TAGS = { iskonto: 'İskonto', yuvarlama: 'Yuvarlama', malHizmet: 'Mal/Hizmet', vergiDahil: 'Vergiler Dahil', odenecek: 'Ödenecek', kdv: 'KDV', kdvToplam: 'KDV Toplamı', kdvTevkifat: 'KDV Tevkifat', matrah: 'KDV Matrahı' };
 
   // Özet kutusunda okunan BİR satırı (bkz. extractSummaryBlock `lines`) sayfa
   // üzerine çizer: etiket soluk dolgu, ALINAN değer koyu çerçeve, ikisi noktalı
@@ -4388,7 +4510,8 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const tag = `${SUMMARY_TAGS[l.id] || l.id}${l.rate !== undefined ? ' %' + l.rate : ''} = ${fmtNum(l.value)}`;
+    // `via`: etiketi çift anlamlı olup rolü bağıntıyla çözülen satır (bkz. resolveAmbiguousAmounts)
+    const tag = `${SUMMARY_TAGS[l.id] || l.id}${l.rate != null ? ' %' + l.rate : ''} = ${fmtNum(l.value)}${l.via ? ' (bağıntıyla)' : ''}`;
     const fs = Math.round(6.5 * scale) + 2;
     ctx.font = `bold ${fs}px sans-serif`;
     const tw = ctx.measureText(tag).width + 8;
@@ -4459,6 +4582,12 @@
       if (table) legend.push('🟧 Başlık bandı', '🟩 Tespit edilen satırlar', '🔵 Sütun sınırları');
       if (summaryLines.length) legend.push('🟪 Özet kutusu (soluk = etiket, koyu çerçeve = ALINAN değer)', '🟥 Toplam İskonto');
       wrap.innerHTML = `<p style="font-size:11px; color:var(--text-muted); padding:6px; margin:0;">${legend.join(' &nbsp;·&nbsp; ')}</p>`;
+      // Etiketi çift anlamlı olup bağıntıyla çözülen satırlar: hangi hesapla çözüldüğünü yaz.
+      const viaLines = summaryLines.filter(l => l.via);
+      if (viaLines.length) {
+        wrap.innerHTML += '<p style="font-size:11px; color:var(--text-muted); padding:0 6px 6px; margin:0;"><b>Bağıntıyla çözülenler</b> (etiketi tek başına yetmedi, tutarlar hesapla doğrulandı): ' +
+          viaLines.map(l => escapeHtml(`${SUMMARY_TAGS[l.id] || l.id}: ${l.via}`)).join(' · ') + '</p>';
+      }
 
       for (const pageNo of pageNos) {
         const page = await pdf.getPage(pageNo);
