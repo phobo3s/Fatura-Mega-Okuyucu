@@ -529,24 +529,45 @@
   // zaten TAM. Eskiden her zaman tevkifatı geri ekliyorduk (sadece "net"
   // senaryosu doğru varsayımıyla) — "tam" senaryosunda bu ÇİFTE SAYMAYA yol
   // açıp yanlış pozitif üretiyordu. Artık iki olasılığı da deniyoruz.
+  //
+  // KAREKODSUZ (regex) satırda matrah YOK, taban Mal/Hizmet olur — o da
+  // iskontolu faturada iskonto ÖNCESİ brüt (akaryakıt gibi). Bu, karekodlu
+  // modda çıkmayan bir YANLIŞ KIRMIZI üretiyordu (fark = tam iskonto tutarı;
+  // kullanıcı regex-only taramada fark etti). Özetten okunan basılı iskonto
+  // varsa (`row.summary.iskonto`) ikinci bir taban adayı olarak Mal/Hizmet −
+  // İskonto da denenir; ikisinden biri tutuyorsa ✓.
   function checkVergiDahilToplam(ctx) {
-    const tabanTutar = ctx.matrahVar ? ctx.matrahToplam : ctx.malHizmet;
-    const tabanLabel = ctx.matrahVar ? 'KDV Matrahları toplamı' : 'Mal/Hizmet Tutarı';
-    if (tabanTutar === null || ctx.vergiDahil === null || !ctx.kdvVar) return [];
+    if (ctx.vergiDahil === null || !ctx.kdvVar) return [];
+    const bases = [];
+    if (ctx.matrahVar) {
+      bases.push({ v: ctx.matrahToplam, text: `KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)})` });
+    } else if (ctx.malHizmet !== null) {
+      bases.push({ v: ctx.malHizmet, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)})` });
+      const isk = ctx.row.summary ? ctx.row.summary.iskonto : undefined;
+      if (isk !== undefined && isk > VALIDATION_EPS) {
+        const net = ctx.malHizmet - isk;
+        bases.push({ v: net, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − Toplam İskonto (${fmtNum(isk)}) = ${fmtNum(net)}` });
+      }
+    }
+    if (!bases.length) return [];
 
-    const beklenenTam = tabanTutar + ctx.kdvToplam; // "Hesaplanan KDV" zaten tam ise  
-    const beklenenNet = beklenenTam + ctx.tevkifatToplam; // "Hesaplanan KDV" net ise, tevkifat geri eklenir  
-    const okTam = Math.abs(beklenenTam - ctx.vergiDahil) <= VALIDATION_EPS;
-    const okNet = ctx.tevkifatVar && Math.abs(beklenenNet - ctx.vergiDahil) <= VALIDATION_EPS;
-    const ok = okTam || okNet;
-    const beklenen = (!okTam && okNet) ? beklenenNet : beklenenTam;
-    const kdvLabel = (!okTam && okNet)
-      ? `Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)}) + Tevkifat (${fmtNum(ctx.tevkifatToplam)}) = Tam KDV (${fmtNum(beklenen - tabanTutar)})`
+    const evalBase = b => {
+      const beklenenTam = b.v + ctx.kdvToplam; // "Hesaplanan KDV" zaten tam ise
+      const beklenenNet = beklenenTam + ctx.tevkifatToplam; // "Hesaplanan KDV" net ise, tevkifat geri eklenir
+      const okTam = Math.abs(beklenenTam - ctx.vergiDahil) <= VALIDATION_EPS;
+      const okNet = ctx.tevkifatVar && Math.abs(beklenenNet - ctx.vergiDahil) <= VALIDATION_EPS;
+      return { b, okTam, okNet, ok: okTam || okNet, beklenen: (!okTam && okNet) ? beklenenNet : beklenenTam };
+    };
+    const results = bases.map(evalBase);
+    // Tutan ilk taban; hiçbiri tutmuyorsa SON taban (iskonto biliniyorsa iskontolu olan) raporlanır.
+    const r = results.find(x => x.ok) || results[results.length - 1];
+    const kdvLabel = (!r.okTam && r.okNet)
+      ? `Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)}) + Tevkifat (${fmtNum(ctx.tevkifatToplam)}) = Tam KDV (${fmtNum(r.beklenen - r.b.v)})`
       : `Hesaplanan KDV toplamı (${fmtNum(ctx.kdvToplam)})`;
     return [{
-      ok,
-      text: `${tabanLabel} (${fmtNum(tabanTutar)}) + ${kdvLabel} = ${fmtNum(beklenen)} ${ok ? '=' : '≠'} Vergiler Dahil Toplam (${fmtNum(ctx.vergiDahil)})` +
-        (ok ? '' : ` — fark: ${fmtNum(ctx.vergiDahil - beklenen)}`)
+      ok: r.ok,
+      text: `${r.b.text} + ${kdvLabel} = ${fmtNum(r.beklenen)} ${r.ok ? '=' : '≠'} Vergiler Dahil Toplam (${fmtNum(ctx.vergiDahil)})` +
+        (r.ok ? '' : ` — fark: ${fmtNum(ctx.vergiDahil - r.beklenen)}`)
     }];
   }
 
