@@ -53,6 +53,12 @@ gelemez; karekod yoksa regex'ten gelir.
 - Aynı alan birden çok yerde geçerse **en alttaki (son) satır** kazanır; özet
   her zaman faturanın altındadır.
 - Tutarın yanındaki `TL`/`EUR` birimi de okunur (bkz. [6](#6-yabancı-para-birimli-faturalar)).
+- **Sayı biçimi:** Türkçe (`1.482,90`) varsayılandır; bazı yazılımlar İngilizce basar
+  (`1,482.90 TRY`, `795.63`). `parseTurkishNumber` bunları ayırır: iki ayraç da varsa
+  *sonuncusu ondalıktır*; tek ayraç nokta ve sonrasında 1–2 hane varsa ondalıktır (Türkçe
+  binlik ayracından sonra hep 3 hane gelir). Regex ile okunan tutarlar tabloda Türkçe
+  biçime çevrilir (Excel'e yapıştırırken doğru çıksın). Eskiden bu biçimler `1,4829` /
+  `79563` okunuyordu (korpusta 8 fatura, aynı yazılım ailesi).
 
 ## 4. Etiket kataloğu
 
@@ -65,7 +71,7 @@ tutarlarıyla** karşılaştırılarak doğrulandı.
 |---|---|
 | Toplam İskonto, İskonto, İndirim Tutarı | İskonto |
 | Fatura Yuvarlama Farkı, Yuvarlama | Yuvarlama |
-| Mal Hizmet Toplam Tutarı | Mal/Hizmet |
+| Mal Hizmet Toplam Tutarı, Malzeme/Hizmet Toplam Tutarı | Mal/Hizmet |
 | Vergiler Dahil Toplam Tutar, Toplam Fatura Tutarı | Vergiler Dahil |
 | Ödenecek Tutar, Ödenecek Toplam | Ödenecek |
 | Hesaplanan KDV (%20) | KDV (oran bazında) |
@@ -207,8 +213,17 @@ regresyon kanıtı değildir, altındaki veriyi karşılaştırın.
   (kalem kontrolü ⚠ verir; sessiz yanlış ✓ değil).
 - **Karekodsuz e-SMM:** özet modülü e-SMM'de kapalı; toplamlar sadece e-SMM regex kurallarından.
 - **Tanınmayan etiket + hiçbir bağıntı tutmuyor:** alan boş kalır (bilerek).
-- Regex bazen `Ödenecek` tutarını yanlış okur (ör. `1.482,90` → `1.4829`); özet bu alanı
-  bulamazsa düzeltilemez. Ayrı bir regex işidir.
+
+### Karekodsuzda hâlâ boş kalanlar (280 e-Fatura, karekod gizli)
+
+51 dosyada en az bir toplam boş. Nedenleri farklıdır, tek bir çözümü yoktur:
+
+| Neden | Dosya | Durum |
+|---|---|---|
+| **Metin katmanı yok** (taranmış / vektör-çizim PDF) | 33 | OCR kapsam dışı; karekod varsa okunur, yoksa satır boş |
+| **Telekom şablonları:** Mal/Hizmet ve Vergiler Dahil etiketi hiç yok; KDV satırı `KDV %20 (Matrah 26.213.10) 5.242,62` ya da `Katma Değer Vergisi │ %20 │ (Matrah:1,119.92) │ 223.98` biçiminde, matrah **etiketin içinde** | ~16 | şablona özgü okuma gerekir, yapılmadı |
+| **Ödenecek basılı değil** (faturada sadece "Genel Toplam"/"Toplam Tutar") | 2 | Ödenecek = Vergiler Dahil türetmesi %98 tutuyor (tevkifatsız 260'ın 255'i) ama basılı olmayan sayı yazmak olur; yapılmadı |
+| Diğer (tek dosyalık farklı etiket) | birkaç | bulundukça kataloğa eklenir |
 
 ## 10. Kodda nerede
 

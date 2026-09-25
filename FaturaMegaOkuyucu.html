@@ -431,10 +431,34 @@
     return n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // Tutar metnini sayıya çevirir. Varsayılan TÜRKÇE biçim ("1.482,90"), ama bazı
+  // yazılımlar İNGİLİZCE biçim basıyor ("1,482.90 TRY", "795.63") — eskiden
+  // bunlar 1,4829 / 79563 olarak okunup doğrulamada ve toplamlarda sessizce
+  // yanlış çıkıyordu (korpusta 8 fatura, hepsi aynı yazılım ailesi). İngilizce
+  // sayılan TEK iki durum (Türkçe'de geçersiz oldukları için belirsizlik yok):
+  //   - iki ayraç da var ve SONUNCUSU nokta:  "1,482.90"
+  //   - tek ayraç nokta ve sonrasında 1-2 hane: "795.63" (Türkçe binlik ayracından
+  //     sonra hep 3 hane gelir: "1.482")
+  // Diğer her şey eskisi gibi Türkçe okunur ("1.482,90", "795,63", "1.482").
   function parseTurkishNumber(s) {
     if (!s) return null;
-    const n = parseFloat(String(s).trim().replace(/\./g, '').replace(',', '.'));
+    const t = String(s).trim();
+    const lastComma = t.lastIndexOf(','), lastDot = t.lastIndexOf('.');
+    const english = (lastComma !== -1 && lastDot > lastComma) || (lastComma === -1 && /^[^.]*\.\d{1,2}$/.test(t));
+    const n = parseFloat(english ? t.replace(/,/g, '') : t.replace(/\./g, '').replace(',', '.'));
     return isNaN(n) ? null : n;
+  }
+
+  // İngilizce biçimli tutar metnini ("1,482.90") tabloda görünen/Excel'e yapıştırılan
+  // Türkçe biçime ("1.482,90") çevirir; Türkçe/başka her metne DOKUNMAZ. Regex ile
+  // okunan tutarlar için (karekod yolu bunu formatQrAmount ile zaten yapıyor).
+  function normalizeEnglishAmount(s) {
+    if (!s || !/^[\d.,]+$/.test(s)) return s;
+    const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.');
+    const english = (lastComma !== -1 && lastDot > lastComma) || (lastComma === -1 && /^[^.]*\.\d{1,2}$/.test(s));
+    if (!english) return s;
+    const n = parseTurkishNumber(s);
+    return n === null ? s : fmtNum(n);
   }
 
   // ==========================================================================
@@ -2265,7 +2289,7 @@
         if (match) {
           matchedRaw[rule.id] = match[1]; // orijinal (boşluklu) haliyle - highlight için
           const clean = match[1].replace(/\s+/g, ''); // temiz görüntü değeri
-          fields[rule.id] = rule.id === 'tarih' ? normalizeDate(clean) : clean;
+          fields[rule.id] = rule.id === 'tarih' ? normalizeDate(clean) : (AMOUNT_FIELD_IDS.includes(rule.id) ? normalizeEnglishAmount(clean) : clean);
         } else {
           fields[rule.id] = '';
         }
@@ -2275,10 +2299,14 @@
     });
 
     const extraFields = extractDynamicAmountFields(fullText);
+    Object.keys(extraFields).forEach(k => { extraFields[k] = normalizeEnglishAmount(extraFields[k]); });
     const isEsmm = extractEsmmFields(fullText, fields, extraFields);
 
     return { raw: fullText, fields, matchedRaw, extraFields, docType: isEsmm ? 'ESMM' : undefined };
   }
+
+  // Regex ile okunan ve tutar olan sabit alanlar (İngilizce biçim Türkçe'ye çevrilir).
+  const AMOUNT_FIELD_IDS = ['malHizmet', 'vergiDahil', 'odenecek'];
 
   // ==========================================================================
   // ÖZET KUTUSU MODÜLÜ — faturanın altındaki "Mal Hizmet Toplam Tutarı / Toplam
@@ -2316,7 +2344,8 @@
   // TÜM boşluk/noktalama/yüzde ifadesi silinip Türkçe harfleri katlanmış
   // ANAHTARI üzerinden yapılıyor.
   const SUMMARY_UNIT = '(?:TL|TRY|EUR|USD|GBP|€|\\$)';
-  const SUMMARY_AMOUNT_RE = new RegExp('^-?[\\d.]+,\\d{2}\\s*' + SUMMARY_UNIT + '?$', 'i');
+  // Tutar: Türkçe ("1.482,90") ya da İngilizce ("1,482.90" / "795.63") biçim, ardından isteğe bağlı birim.
+  const SUMMARY_AMOUNT_RE = new RegExp('^-?(?:[\\d.]+,\\d{2}|[\\d,]*\\d\\.\\d{2})\\s*' + SUMMARY_UNIT + '?$', 'i');
   const SUMMARY_UNIT_ONLY_RE = new RegExp('^' + SUMMARY_UNIT + '$', 'i');
 
   // Etiketi eşleştirme anahtarına indirger: büyük harf, Türkçe harfler
@@ -2377,7 +2406,7 @@
   const SUMMARY_FIELDS = [
     { id: 'iskonto',     re: /^(TOPLAM)?(ISKONTO|INDIRIM)(TUTARI)?(TL)?$/ },
     { id: 'yuvarlama',   re: /^(FATURA)?YUVARLAMA(FARKI)?(TL)?$/ },
-    { id: 'malHizmet',   re: /^MALHIZMETTOPLAMTUTARI(TL)?$/ },
+    { id: 'malHizmet',   re: /^MAL(ZEME)?HIZMETTOPLAMTUTARI(TL)?$/ },
     { id: 'vergiDahil',  re: /^((VERGILER|KDV)DAHILTOPLAMTUTAR|TOPLAMFATURATUTARI)(TL)?$/ },
     { id: 'odenecek',    re: /^ODENECEK(TUTAR|TOPLAM)(TL)?$/ },
     { id: 'kdvTevkifat', re: /^HESAPLANANKDVTEVKIFAT(TL)?$/, rated: true },
