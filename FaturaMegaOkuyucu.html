@@ -106,6 +106,7 @@
     .validation-box li { margin-bottom: 4px; }
     .validation-box li.check-ok { color: #475569; }
     .validation-box li.check-fail { color: #991b1b; font-weight: 600; }
+    .validation-box li.check-info { color: #b45309; }
 
     .qr-locate-btn { padding: 1px 5px; font-size: 10px; margin-left: 4px; border-radius: 5px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; }
     .qr-locate-btn:hover { background: #eff6ff; border-color: var(--primary); }
@@ -632,14 +633,20 @@
   // türetilmiş bir TAHMİN olarak gösteriyoruz: Mal/Hizmet Tutarı ile KDV
   // Matrahları toplamı arasındaki fark, iskonto uygulanmışsa bu farka eşit
   // çıkar (gerçek örneklerle doğrulandı). Her
-  // zaman ok:true — bir hata değil, sadece bilgi notu.
+  // zaman ok:true — bir hata değil, sadece bilgi notu. `info:true` bayrağı,
+  // kutuda bunun gerçek bir "kontrol" DEĞİL doğrulanmamış bir TAHMİN olduğunu
+  // (yeşil ✓ yerine sarı ⚠, "N kontrolün hepsi başarılı" sayısına dahil
+  // değil) göstermek için. Metin, farkın SADECE iskonto olmayabileceğini de
+  // söylüyor: akaryakıt faturalarında (korpusta 25 dosya, hep ~×1,034) fark
+  // iskonto değil, matraha girmeyen vergi tabanı farkı (bkz. CLAUDE.md).
   function checkOlasiIskonto(ctx) {
     if (!ctx.matrahVar || ctx.malHizmet === null) return [];
     const fark = ctx.malHizmet - ctx.matrahToplam;
     if (fark <= VALIDATION_EPS) return [];
     return [{
       ok: true,
-      text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — muhtemelen iskonto (QR bunu ayrıca vermiyor, bu türetilmiş bir tahmindir, kesin değildir)`
+      info: true,
+      text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — iskonto olabilir, ya da matraha girmeyen bir vergi tabanı farkı olabilir (ör. akaryakıt). QR bunu ayrıca vermiyor, türetilmiş bir tahmindir, kesin değildir`
     }];
   }
 
@@ -2456,13 +2463,18 @@
     }
 
     const failedCount = checks.filter(c => !c.ok).length;
+    // `info` işaretli satırlar (ör. Olası İskonto) doğrulanmamış TAHMİN —
+    // "başarılı kontrol" sayısına katılmıyor, sarı ⚠ ile ayrı gösteriliyor.
+    const realCount = checks.filter(c => !c.info).length;
     const boxClass = failedCount ? 'validation-box' : 'validation-box validation-ok';
     const title = failedCount
       ? `⚠ Bu faturada ${failedCount} tutarsızlık bulundu:`
-      : `✓ Yapılan ${checks.length} kontrolün hepsi başarılı:`;
+      : (realCount ? `✓ Yapılan ${realCount} kontrolün hepsi başarılı:` : 'ℹ Bilgi notu:');
 
     box.innerHTML = `<div class="${boxClass}"><b>${title}</b><ul>` +
-      checks.map(c => `<li class="${c.ok ? 'check-ok' : 'check-fail'}">${c.ok ? '✓' : '✗'} ${escapeHtml(c.text)}</li>`).join('') +
+      checks.map(c => c.info
+        ? `<li class="check-info">⚠ ${escapeHtml(c.text)}</li>`
+        : `<li class="${c.ok ? 'check-ok' : 'check-fail'}">${c.ok ? '✓' : '✗'} ${escapeHtml(c.text)}</li>`).join('') +
       '</ul></div>';
   }
 
