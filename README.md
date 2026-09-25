@@ -58,6 +58,7 @@ atabilirsiniz. Ayrıntı: [Windows entegrasyonu](#windows-entegrasyonu-nasıl-ç
 | **Regex yedeği** | QR yoksa sayfa metninden alan çıkarır. Kurallar **sol panelden düzenlenebilir** ve `mega_config.json` ile taşınabilir. |
 | **e-Fatura + e-SMM** | İki belge türü ayrı ayrı ele alınır — farklı QR şemaları, farklı alan kümeleri, farklı doğrulama kuralları. Bkz. [QR şemaları](docs/qr-semalari.md). |
 | **Matematiksel doğrulama** | KDV matrahı + hesaplanan KDV = vergiler dahil toplam; vergiler dahil − tevkifat = ödenecek; tevkifat oranı standart GİB fraksiyonlarından biri mi; olası iskonto tespiti. Sorunlu satırlar kırmızı işaretlenir. |
+| **Özet kutusu (iskonto)** | Karekod iskonto tutarını vermez; ama faturanın altındaki özet kutusunda ("Mal Hizmet Toplam Tutarı / Toplam İskonto / ...") genelde basılıdır. Araç bu satırları etiket + değer olarak okur (çizgiye bağlı değil), sıfırdan farklı iskonto varsa **"Toplam İskonto" sütunu** ekler ve `Mal/Hizmet − İskonto = KDV Matrahı` kontrolünü **tahmin değil gerçek kontrol** olarak yapar; kalem toplamı da iskonto düşülmüş haliyle karşılaştırılır. Karekodun verdiği hiçbir değeri ezmez, sadece ek bilgi ekler. Özet kutusu bulunamayan faturalarda (ör. bazı telekom şablonları) eski "olası iskonto" tahmini (sarı ⚠) devam eder. |
 | **Mükerrer tespiti** | Aynı ETTN veya fatura no birden fazla satırdaysa uyarır. |
 | **Türetilmiş alanlar** | Tevkifat tutarı ve oranı QR'da olmasa bile `Vergiler Dahil − Ödenecek` üzerinden hesaplanır. |
 | **Dışa aktarma** | Panoya kopyala (Excel'e yapıştırmaya hazır) veya CSV indir. |

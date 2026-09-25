@@ -288,7 +288,8 @@
 
       <p><b>Bilgi notu — Olası İskonto (hata değildir, sadece tahmindir):</b><br>
       <code>Mal/Hizmet Tutarı − KDV Matrahları Toplamı = Olası İskonto</code><br>
-      <span style="color:var(--text-muted);">Karekod verisi iskonto tutarını hiçbir zaman ayrıca vermiyor. Bazı faturalarda "Mal/Hizmet Tutarı" iskonto öncesi brüt tutarı taşıdığı için, matrah toplamıyla arasındaki fark iskontoya işaret edebilir — ama bu kesin değildir, sadece bir tahmindir, bu yüzden asla "hata" (kırmızı) olarak işaretlenmez.</span></p>
+      <span style="color:var(--text-muted);">Karekod verisi iskonto tutarını hiçbir zaman ayrıca vermiyor. Bazı faturalarda "Mal/Hizmet Tutarı" iskonto öncesi brüt tutarı taşıdığı için, matrah toplamıyla arasındaki fark iskontoya işaret edebilir — ama bu kesin değildir, sadece bir tahmindir, bu yüzden asla "hata" (kırmızı) olarak işaretlenmez.</span><br>
+      <span style="color:var(--text-muted);"><b>Faturanın altındaki özet kutusunda "Toplam İskonto" basılıysa</b> (çoğu e-Fatura şablonunda basılıyor) bu değer doğrudan okunur, tahmine gerek kalmaz: sıfırdan farklıysa "Toplam İskonto" sütununa yazılır ve <code>Mal/Hizmet − İskonto = KDV Matrahları</code> gerçek bir kontrol olur. Matrah beklenenden BÜYÜKSE (elektrik tüketim vergisi gibi matraha giren özel vergiler/masraflar matrahı artırabilir) sarı ⚠ bilgi notu, KÜÇÜKSE gerçek tutarsızlık (kırmızı) sayılır. Kalem toplamı da <code>Mal/Hizmet − İskonto</code> ile örtüşüyorsa ✓ verilir.</span></p>
 
       <p style="margin-top:14px; padding-top:10px; border-top:1px solid var(--border-color);">
       <b>ℹ️ Özel vergiler (ÖİV, Konaklama Vergisi, Damga Vergisi vb.) ve KDV/matrah/tevkifat tutarları yukarıdaki hiçbir formüle dahil edilmez</b> — bunlar hangi aşamada (KDV öncesi/sonrası) hesaba katıldığı güvenilir şekilde bilinmediği için sadece kendi sütunlarında bilgi amaçlı gösterilir.
@@ -636,17 +637,52 @@
   // zaman ok:true — bir hata değil, sadece bilgi notu. `info:true` bayrağı,
   // kutuda bunun gerçek bir "kontrol" DEĞİL doğrulanmamış bir TAHMİN olduğunu
   // (yeşil ✓ yerine sarı ⚠, "N kontrolün hepsi başarılı" sayısına dahil
-  // değil) göstermek için. Metin, farkın SADECE iskonto olmayabileceğini de
-  // söylüyor: akaryakıt faturalarında (korpusta 25 dosya, hep ~×1,034) fark
-  // iskonto değil, matraha girmeyen vergi tabanı farkı (bkz. CLAUDE.md).
+  // değil) göstermek için.
+  //
+  // FATURANIN ALTINDAKİ ÖZET KUTUSUNDA "Toplam İskonto" BASILIYSA
+  // (`row.summary.iskonto`, bkz. extractSummaryBlock) tahmine gerek kalmıyor:
+  // GERÇEK bir kontrole dönüşür — Mal/Hizmet − İskonto = Matrah. Bu, eskiden
+  // "akaryakıt = ÖTV taban farkı" sandığımız 25 dosyanın aslında İSKONTO
+  // olduğunu ortaya çıkardı (QR'daki Mal/Hizmet Tutarı iskonto ÖNCESİ, kalem
+  // toplamı iskonto SONRASI; basılı iskonto farkı birebir açıklıyor).
   function checkOlasiIskonto(ctx) {
     if (!ctx.matrahVar || ctx.malHizmet === null) return [];
     const fark = ctx.malHizmet - ctx.matrahToplam;
+    const isk = ctx.row.summary ? ctx.row.summary.iskonto : undefined;
+    if (isk !== undefined) {
+      if (isk > VALIDATION_EPS) {
+        const beklenen = ctx.malHizmet - isk;
+        const M = fmtNum(ctx.matrahToplam);
+        // 1) Mal/Hizmet brüt: MH − İskonto = Matrah
+        if (Math.abs(beklenen - ctx.matrahToplam) <= VALIDATION_EPS) {
+          return [{ ok: true, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − Toplam İskonto (${fmtNum(isk)}) = ${fmtNum(beklenen)} = KDV Matrahları toplamı (${M})` }];
+        }
+        // 2) Mal/Hizmet ZATEN iskonto sonrası (bazı yazılımlar öyle basıyor): MH = Matrah
+        if (Math.abs(ctx.malHizmet - ctx.matrahToplam) <= VALIDATION_EPS) {
+          return [{ ok: true, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) = KDV Matrahları toplamı (${M}) — Toplam İskonto (${fmtNum(isk)}) zaten düşülmüş görünüyor` }];
+        }
+        // 3) Matrah beklenenden BÜYÜK: matraha giren özel vergiler/masraflar (ör.
+        //    elektrik tüketim vergisi, enerji fonu) matrahı ARTIRABİLİR — hata
+        //    değil, bilgi (gerçek örnekle bulundu: 44.501,56 − 1.306,35 +
+        //    1.525,89 özel vergi = 44.721,10 matrah).
+        if (ctx.matrahToplam > beklenen) {
+          return [{ ok: true, info: true, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − Toplam İskonto (${fmtNum(isk)}) = ${fmtNum(beklenen)} < KDV Matrahları toplamı (${M}) — aradaki ${fmtNum(ctx.matrahToplam - beklenen)} matraha giren diğer kalemler (özel vergi/masraf vb.) olabilir` }];
+        }
+        // 4) Matrah beklenenden KÜÇÜK: ek kalemler matrahı azaltamaz — gerçek tutarsızlık
+        return [{ ok: false, text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − Toplam İskonto (${fmtNum(isk)}) = ${fmtNum(beklenen)} ≠ KDV Matrahları toplamı (${M}) — fark: ${fmtNum(ctx.matrahToplam - beklenen)}` }];
+      }
+      if (fark <= VALIDATION_EPS) return [];
+      return [{
+        ok: true,
+        info: true,
+        text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — ama faturada basılı Toplam İskonto 0,00; bu fark iskonto olarak görünmüyor, kaynağı belirsiz`
+      }];
+    }
     if (fark <= VALIDATION_EPS) return [];
     return [{
       ok: true,
       info: true,
-      text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — iskonto olabilir, ya da matraha girmeyen bir vergi tabanı farkı olabilir (ör. akaryakıt). QR bunu ayrıca vermiyor, türetilmiş bir tahmindir, kesin değildir`
+      text: `Mal/Hizmet Tutarı (${fmtNum(ctx.malHizmet)}) − KDV Matrahları toplamı (${fmtNum(ctx.matrahToplam)}) = ${fmtNum(fark)} — muhtemelen iskonto (QR bunu ayrıca vermiyor, bu türetilmiş bir tahmindir, kesin değildir)`
     }];
   }
 
@@ -795,6 +831,9 @@
   // kullanıyor ama SONUCU bir sütuna da yazıyor (Tevkifat'ta yaptığımız gibi)
   // ki tabloda direkt görünsün, sadece kontrol kutusuna gömülü kalmasın.
   function computeDerivedDiscountField(row) {
+    // Faturanın altındaki özet kutusunda "Toplam İskonto" BASILIYSA gerçek
+    // değer elimizde (bkz. applySummaryFields) — tahmine gerek yok.
+    if (row.summary && row.summary.iskonto !== undefined) return;
     const malHizmet = parseTurkishNumber(row.fields.malHizmet);
     if (malHizmet === null) return;
 
@@ -815,8 +854,22 @@
   // çalıştırır, mükerrer fatura kontrolünü ekler ve dinamik sütunları
   // günceller. Tüm satırlar bittikten sonra çağrılmalı (hem sütun listesi hem
   // mükerrer tespiti hepsine bakarak kurulur).
+  // Özet kutusundan (row.summary, bkz. extractSummaryBlock) gelen değerleri
+  // satırın sütunlarına yansıtır. Sadece EKLEMELİ: QR'ın verdiği hiçbir değere
+  // dokunmaz. İskonto sütunu SADECE en az bir faturada sıfırdan farklı iskonto
+  // varsa görünür (dinamik sütun mekanizması boş sütunu zaten göstermiyor).
+  function applySummaryFields(row) {
+    const s = row.summary;
+    if (!s || s.iskonto === undefined) return;
+    row.extraFields = row.extraFields || {};
+    delete row.extraFields['Olası İskonto']; // basılı gerçek değer varsa tahmin eskir
+    if (s.iskonto > VALIDATION_EPS) row.extraFields['Toplam İskonto'] = fmtNum(s.iskonto);
+    else delete row.extraFields['Toplam İskonto'];
+  }
+
   function finalizeRows() {
     rows.forEach(row => computeDerivedTevkifatFields(row));
+    rows.forEach(row => applySummaryFields(row));
     rows.forEach(row => computeDerivedDiscountField(row));
     rows.forEach(row => { row.validationChecks = validateRow(row); });
     applyDuplicateChecks();
@@ -1040,7 +1093,8 @@
         const arrayBuffer = await file.arrayBuffer();
         pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const regexFields = await tryExtractViaRegex(pdf);
-        rows[i] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
+        const prevSummary = rows[i].summary; // özet kutusu PDF'in özelliği, çıkarma yönteminin değil — koru
+        rows[i] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType, summary: prevSummary };
       } catch (err) {
         console.error(err);
         rows[i] = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'Hata: ' + (err.message || String(err)) };
@@ -1183,6 +1237,7 @@
     try {
       const buf = await file.arrayBuffer();
       pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const prevSummary = rows[index].summary; // özet kutusu PDF'in özelliği, çıkarma yönteminin değil — koru
 
       if (method === 'qr') {
         const qrFields = await tryExtractViaQr(pdf, onPhase);
@@ -1204,6 +1259,7 @@
           rows[index] = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
         }
       }
+      rows[index].summary = prevSummary;
 
       finalizeRows();
       renderTable();
@@ -1469,7 +1525,8 @@
 
     if (found) {
       const qrResult = buildQrResult(found);
-      rows[index] = { fileName: file.name, source: 'QR', fields: qrResult.fields, raw: qrResult.raw, parsedQr: qrResult.parsedQr, extraFields: qrResult.extraFields, docType: qrResult.docType };
+      const prevSummary = rows[index].summary; // özet kutusu PDF'in özelliği, çıkarma yönteminin değil — koru
+      rows[index] = { fileName: file.name, source: 'QR', fields: qrResult.fields, raw: qrResult.raw, parsedQr: qrResult.parsedQr, extraFields: qrResult.extraFields, docType: qrResult.docType, summary: prevSummary };
       finalizeRows();
       renderTable();
       if (document.getElementById('pdfSelect').value == index) renderInspector();
@@ -1641,6 +1698,11 @@
           row = { fileName: file.name, source: 'Regex', fields: regexFields.fields, raw: regexFields.raw, matchedRaw: regexFields.matchedRaw, extraFields: regexFields.extraFields, docType: regexFields.docType };
         } else {
           row = { fileName: file.name, source: 'Bulunamadı', fields: {}, raw: 'QR bulunamadı (regex kapalı).' };
+        }
+        // Faturanın altındaki özet kutusu (iskonto vb.) — QR/regex sonucunu
+        // ASLA ezmez, sadece ek bilgi; hata verirse sessizce atlanır.
+        if (row.source !== 'Bulunamadı' && row.docType !== 'ESMM') {
+          try { row.summary = await extractSummaryBlock(pdf); } catch (e) { row.summary = undefined; }
         }
       } catch (err) {
         console.error(err);
@@ -2138,6 +2200,112 @@
     return { raw: fullText, fields, matchedRaw, extraFields, docType: isEsmm ? 'ESMM' : undefined };
   }
 
+  // ==========================================================================
+  // ÖZET KUTUSU MODÜLÜ — faturanın altındaki "Mal Hizmet Toplam Tutarı / Toplam
+  // İskonto / Hesaplanan KDV / Vergiler Dahil Toplam Tutar / Ödenecek Tutar"
+  // tablosu
+  // ==========================================================================
+  // Ürün kalemi tablosuyla AYNI mantık (satırlar y'ye, sütunlar x'e göre
+  // keşfedilir) ama iki fark var: başlık satırı YOK ve çapa "Sıra No" değil,
+  // bilinen ETİKET kelimeleri. Bu yüzden regresyona çok hassas olan
+  // `detectLineItemTable`'a DOKUNMADAN, aynı fikri yeniden kullanılabilir
+  // küçük yardımcılara ayırdık (groupItemsIntoLines / splitLabelValue /
+  // foldTRKey) — ileride kalem tablosu da bunları kullanabilir.
+  //
+  // Kutuyu ÇİZGİYLE bulmuyoruz: çizgi tespiti bu projede defalarca dekoratif
+  // alt çizgilere takıldı (bkz. CLAUDE.md, son satır sağlık kontrolü). Etiket
+  // metni + AYNI y'deki sağ değer çok daha güvenilir. Etiketler 360 dosyalık
+  // gerçek korpusta kataloglandı (206 dosyada özet satırı çıktı; "Toplam
+  // İskonto" 141'inde yazıyor ama sadece 30'unda sıfırdan farklı); varyantlar
+  // çok ("Ödenecek Tutar :", "(TL)" eki, "Toplam Iskonto", "A ra Toplam"
+  // gibi harf arası boşluklu yazımlar) — bu yüzden eşleştirme, etiketin
+  // TÜM boşluk/noktalama/yüzde ifadesi silinip Türkçe harfleri katlanmış
+  // ANAHTARI üzerinden yapılıyor.
+  const SUMMARY_UNIT = '(?:TL|TRY|EUR|USD|GBP|€|\\$)';
+  const SUMMARY_AMOUNT_RE = new RegExp('^-?[\\d.]+,\\d{2}\\s*' + SUMMARY_UNIT + '?$', 'i');
+  const SUMMARY_UNIT_ONLY_RE = new RegExp('^' + SUMMARY_UNIT + '$', 'i');
+
+  // Etiketi eşleştirme anahtarına indirger: büyük harf, Türkçe harfler
+  // katlanmış (Ö->O...), harf/rakam dışındaki her şey (boşluk, ':', '(', '%')
+  // silinmiş. "Toplam İskonto :" -> "TOPLAMISKONTO".
+  function foldTRKey(s) {
+    return normTRUpper(s)
+      .replace(/Ö/g, 'O').replace(/Ü/g, 'U').replace(/Ş/g, 'S').replace(/Ç/g, 'C').replace(/Ğ/g, 'G')
+      .replace(/[^A-Z0-9]/g, '');
+  }
+
+  // Metin parçalarını ({s, x, y}) y'ye göre satırlara gruplar; her satırdaki
+  // parçalar soldan sağa (x) sıralı döner. Üstten alta (y azalan) sıralıdır.
+  function groupItemsIntoLines(items, tol = 2) {
+    const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    const lines = [];
+    for (const it of sorted) {
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(last.y - it.y) <= tol) last.items.push(it);
+      else lines.push({ y: it.y, items: [it] });
+    }
+    lines.forEach(l => l.items.sort((a, b) => a.x - b.x));
+    return lines;
+  }
+
+  // Bir satırı {label, valueStr} olarak ayırır: EN SAĞDAKİ tutar değer, solda
+  // kalan her şey etiket. Tutardan sonra ayrı bir parça olarak gelen "TL" gibi
+  // birim atılır. Tutarla bitmeyen satır (ör. başlık, açıklama) null döner.
+  function splitLabelValue(lineItems) {
+    const its = lineItems.map(i => ({ s: i.s.trim(), x: i.x })).filter(i => i.s);
+    if (its.length && SUMMARY_UNIT_ONLY_RE.test(its[its.length - 1].s)) its.pop();
+    if (its.length < 2) return null;
+    const last = its[its.length - 1];
+    if (!SUMMARY_AMOUNT_RE.test(last.s)) return null;
+    return { label: its.slice(0, -1).map(i => i.s).join(' '), valueStr: last.s };
+  }
+
+  // Etiket ANAHTARI -> alan eşlemesi. `rated:true` olanlar oran bazında
+  // ("Hesaplanan KDV(%20)") tekrarlanır. Sıra önemli: daha özel olan önce.
+  const SUMMARY_FIELDS = [
+    { id: 'iskonto',     re: /^(TOPLAM)?(ISKONTO|INDIRIM)(TUTARI)?(TL)?$/ },
+    { id: 'yuvarlama',   re: /^(FATURA)?YUVARLAMA(FARKI)?(TL)?$/ },
+    { id: 'malHizmet',   re: /^MALHIZMETTOPLAMTUTARI(TL)?$/ },
+    { id: 'vergiDahil',  re: /^(VERGILER|KDV)DAHILTOPLAMTUTAR(TL)?$/ },
+    { id: 'odenecek',    re: /^ODENECEKTUTAR(TL)?$/ },
+    { id: 'kdvTevkifat', re: /^HESAPLANANKDVTEVKIFAT(TL)?$/, rated: true },
+    { id: 'kdv',         re: /^HESAPLANANKDV(GERCEK)?(TL)?$/, rated: true }
+  ];
+
+  // PDF'in TÜM sayfalarındaki metinden özet kutusu değerlerini çıkarır:
+  // { iskonto, yuvarlama, malHizmet, vergiDahil, odenecek: number,
+  //   kdv: {oran: number}, kdvTevkifat: {oran: number} } — bulunmayan alan yok.
+  // Aynı alan birden çok yerde geçerse SONUNCUSU (sayfa sırasında/aşağıda) kazanır:
+  // özet her zaman faturanın en altında, tablodan sonra gelir.
+  async function extractSummaryBlock(pdf) {
+    const found = {};
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const tc = await page.getTextContent();
+      const items = tc.items
+        .map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5] }))
+        .filter(it => it.s.trim() !== '');
+      for (const line of groupItemsIntoLines(items)) {
+        const lv = splitLabelValue(line.items);
+        if (!lv) continue;
+        const rateM = lv.label.match(/%\s*([\d.,]+)/);
+        const key = foldTRKey(lv.label.replace(/%\s*[\d.,]+/g, ''));
+        const def = SUMMARY_FIELDS.find(f => f.re.test(key));
+        if (!def) continue;
+        const value = parseTurkishNumber(lv.valueStr);
+        if (value === null) continue;
+        if (def.rated) {
+          const rate = rateM ? parseFloat(rateM[1].replace(',', '.')) : null;
+          if (rate === null || isNaN(rate)) continue;
+          (found[def.id] = found[def.id] || {})[rate] = value;
+        } else {
+          found[def.id] = value;
+        }
+      }
+    }
+    return found;
+  }
+
   // e-SMM metin katmanı e-Fatura'dan tamamen farklı etiketler kullanıyor
   // ("Belge Numarası" değil "Fatura No", "Brüt Ücret Tutarı" değil "Mal/
   // Hizmet Toplamı" vb.) — bu yüzden sol paneldeki AYRI, kullanıcının
@@ -2287,7 +2455,9 @@
       } else if (lic.status === 'no_compare') {
         kalemCell = `<span class="badge badge-ok" title="Kalem tablosu bulundu ama karşılaştırılacak Mal/Hizmet Tutarı yok">Bulundu</span>`;
       } else if (lic.status === 'ok') {
-        kalemCell = `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) Mal/Hizmet Tutarı (${fmtNum(lic.target)}) ile örtüşüyor">✓</span>`;
+        kalemCell = lic.iskonto !== undefined
+          ? `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) = Mal/Hizmet Tutarı (${fmtNum(lic.target)}) − Toplam İskonto (${fmtNum(lic.iskonto)}) — QR'daki tutar iskonto öncesi">✓</span>`
+          : `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) Mal/Hizmet Tutarı (${fmtNum(lic.target)}) ile örtüşüyor">✓</span>`;
       } else {
         kalemCell = `<span class="badge badge-none" title="Kalem toplamı (${fmtNum(lic.sum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(lic.target)}) — fark: ${fmtNum(lic.diff)}">⚠</span>`;
       }
@@ -3822,6 +3992,22 @@
     return any ? sum : null;
   }
 
+  // Kalem toplamı ↔ QR "Mal/Hizmet Tutarı" karşılaştırması. QR'daki tutar bazı
+  // faturalarda iskonto ÖNCESİ brüt, kalemler/matrah iskonto SONRASI (akaryakıt
+  // ailesindeki 25 "uyuşmazlığın" gerçek nedeni buydu) — bu yüzden faturanın
+  // altında BASILI "Toplam İskonto" varsa (row.summary.iskonto) `Mal/Hizmet −
+  // İskonto` da kabul ediliyor. Karşılaştırılamıyorsa null döner.
+  function matchLineItemSum(row, sum) {
+    const target = parseTurkishNumber(row.fields.malHizmet);
+    if (sum === null || target === null) return null;
+    if (Math.abs(sum - target) <= VALIDATION_EPS) return { ok: true, target };
+    const isk = row.summary ? row.summary.iskonto : undefined;
+    if (isk !== undefined && isk > VALIDATION_EPS && Math.abs(sum - (target - isk)) <= VALIDATION_EPS) {
+      return { ok: true, target, iskonto: isk };
+    }
+    return { ok: false, target };
+  }
+
   let currentLineItemTable = null; // panoya kopyalama için son çıkarılan tablo
 
   async function openLineItemTable(index) {
@@ -3866,11 +4052,13 @@
 
       // Olası çapraz kontrol: son sütun toplamı ile Mal/Hizmet Tutarı örtüşüyor mu?
       const lastColSum = sumLastColumn(table);
-      const malHizmet = row ? parseTurkishNumber(row.fields.malHizmet) : null;
-      if (lastColSum !== null && malHizmet !== null) {
-        const ok = Math.abs(lastColSum - malHizmet) <= VALIDATION_EPS;
-        document.getElementById('lineItemStatus').innerHTML = ok
-          ? `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) ile örtüşüyor.</span>`
+      const m = row ? matchLineItemSum(row, lastColSum) : null;
+      if (m !== null) {
+        const malHizmet = m.target;
+        document.getElementById('lineItemStatus').innerHTML = m.ok
+          ? (m.iskonto !== undefined
+            ? `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) = Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) − Toplam İskonto (${fmtNum(m.iskonto)}) — QR'daki tutar iskonto öncesi, kalemler iskonto sonrası.</span>`
+            : `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) ile örtüşüyor.</span>`)
           : `<span style="color:var(--danger);">⚠ Son sütun toplamı (${fmtNum(lastColSum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) — fark: ${fmtNum(malHizmet - lastColSum)}. Son sütun bu vendor'da "satır tutarı" olmayabilir, ya da tablo yanlış çıkarılmış olabilir.</span>`;
       } else if (lastColSum !== null) {
         document.getElementById('lineItemStatus').textContent = `Son sütun toplamı: ${fmtNum(lastColSum)} (karşılaştırılacak Mal/Hizmet Tutarı bulunamadı)`;
@@ -3920,12 +4108,11 @@
           row.lineItemCheck = { status: 'not_found' };
         } else {
           const sum = sumLastColumn(table);
-          const target = parseTurkishNumber(row.fields.malHizmet);
-          if (sum === null || target === null) {
+          const m = matchLineItemSum(row, sum);
+          if (m === null) {
             row.lineItemCheck = { status: 'no_compare', sum };
           } else {
-            const ok = Math.abs(sum - target) <= VALIDATION_EPS;
-            row.lineItemCheck = { status: ok ? 'ok' : 'mismatch', sum, target, diff: target - sum };
+            row.lineItemCheck = { status: m.ok ? 'ok' : 'mismatch', sum, target: m.target, diff: m.target - sum, iskonto: m.iskonto };
           }
         }
       } catch (err) {
