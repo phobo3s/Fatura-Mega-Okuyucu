@@ -2643,8 +2643,17 @@
     const checks = row.validationChecks || [];
     box.style.display = 'block';
 
+    // Özet kutusu (iskonto vb.) bu faturadan okunduysa, nereden okunduğunu
+    // PDF üzerinde gösteren düğme (bkz. openSummaryVisual). Kontrol YOKSA da
+    // gösterilir: özet bulunmuş ama karşılaştırılacak tutar çıkmamış olabilir.
+    validationBoxRow = row;
+    const canShowSummary = !!(row.summary && row.summary.lines && row.summary.lines.length);
+    const summaryBtn = canShowSummary
+      ? '<button class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="openSummaryVisual()">👁 Özet kutusunda nereden okundu?</button>'
+      : '';
+
     if (!checks.length) {
-      box.innerHTML = '<div class="validation-box validation-ok">Bu faturada karşılaştırılacak yeterli tutar alanı bulunamadı (kontrol atlandı).</div>';
+      box.innerHTML = '<div class="validation-box validation-ok">Bu faturada karşılaştırılacak yeterli tutar alanı bulunamadı (kontrol atlandı).' + summaryBtn + '</div>';
       return;
     }
 
@@ -2657,17 +2666,11 @@
       ? `⚠ Bu faturada ${failedCount} tutarsızlık bulundu:`
       : (realCount ? `✓ Yapılan ${realCount} kontrolün hepsi başarılı:` : 'ℹ Bilgi notu:');
 
-    // Özet kutusu (iskonto vb.) bu faturadan okunduysa, nereden okunduğunu
-    // PDF üzerinde gösteren düğme (bkz. openSummaryVisual).
-    validationBoxRow = row;
-    const canShowSummary = !!(row.summary && row.summary.lines && row.summary.lines.length);
     box.innerHTML = `<div class="${boxClass}"><b>${title}</b><ul>` +
       checks.map(c => c.info
         ? `<li class="check-info">⚠ ${escapeHtml(c.text)}</li>`
         : `<li class="${c.ok ? 'check-ok' : 'check-fail'}">${c.ok ? '✓' : '✗'} ${escapeHtml(c.text)}</li>`).join('') +
-      '</ul>' +
-      (canShowSummary ? '<button class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="openSummaryVisual()">👁 Özet kutusunda nereden okundu?</button>' : '') +
-      '</div>';
+      '</ul>' + summaryBtn + '</div>';
   }
 
   function renderInspector() {
