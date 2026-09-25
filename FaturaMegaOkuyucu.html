@@ -2252,12 +2252,13 @@
   // kalan her şey etiket. Tutardan sonra ayrı bir parça olarak gelen "TL" gibi
   // birim atılır. Tutarla bitmeyen satır (ör. başlık, açıklama) null döner.
   function splitLabelValue(lineItems) {
-    const its = lineItems.map(i => ({ s: i.s.trim(), x: i.x })).filter(i => i.s);
+    const its = lineItems.map(i => ({ s: i.s.trim(), x: i.x, w: i.w || 0, h: i.h || 0 })).filter(i => i.s);
     if (its.length && SUMMARY_UNIT_ONLY_RE.test(its[its.length - 1].s)) its.pop();
     if (its.length < 2) return null;
     const last = its[its.length - 1];
     if (!SUMMARY_AMOUNT_RE.test(last.s)) return null;
-    return { label: its.slice(0, -1).map(i => i.s).join(' '), valueStr: last.s };
+    const labelItems = its.slice(0, -1);
+    return { label: labelItems.map(i => i.s).join(' '), valueStr: last.s, labelItems, valueItem: last };
   }
 
   // Etiket ANAHTARI -> alan eşlemesi. `rated:true` olanlar oran bazında
@@ -2277,13 +2278,20 @@
   //   kdv: {oran: number}, kdvTevkifat: {oran: number} } — bulunmayan alan yok.
   // Aynı alan birden çok yerde geçerse SONUNCUSU (sayfa sırasında/aşağıda) kazanır:
   // özet her zaman faturanın en altında, tablodan sonra gelir.
+  //
+  // `lines`: kazanan HER satırın sayfadaki yeri (PDF koordinatı, y yukarı):
+  // { id, rate?, page, y, h, value, label, labelBox:{x0,x1}, valueBox:{x0,x1} }
+  // — 👁 Görsel Doğrulama'da bu satırların nereden okunduğunu göstermek için
+  // (bkz. toggleLineItemVisual). Değer alanlarıyla (iskonto, malHizmet...) aynı
+  // nesnede durur ama sadece görselleştirme okur.
   async function extractSummaryBlock(pdf) {
     const found = {};
+    const lineRecs = {};
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const tc = await page.getTextContent();
       const items = tc.items
-        .map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5] }))
+        .map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: it.height }))
         .filter(it => it.s.trim() !== '');
       for (const line of groupItemsIntoLines(items)) {
         const lv = splitLabelValue(line.items);
@@ -2294,15 +2302,23 @@
         if (!def) continue;
         const value = parseTurkishNumber(lv.valueStr);
         if (value === null) continue;
+        let rate;
         if (def.rated) {
-          const rate = rateM ? parseFloat(rateM[1].replace(',', '.')) : null;
+          rate = rateM ? parseFloat(rateM[1].replace(',', '.')) : null;
           if (rate === null || isNaN(rate)) continue;
           (found[def.id] = found[def.id] || {})[rate] = value;
         } else {
           found[def.id] = value;
         }
+        const span = its => ({ x0: Math.min(...its.map(i => i.x)), x1: Math.max(...its.map(i => i.x + (i.w || 0))) });
+        lineRecs[def.id + (def.rated ? '@' + rate : '')] = {
+          id: def.id, rate, page: p, y: line.y, value, label: lv.label,
+          h: Math.max(...line.items.map(i => i.h || 0)) || 9,
+          labelBox: span(lv.labelItems), valueBox: span([lv.valueItem])
+        };
       }
     }
+    found.lines = Object.values(lineRecs);
     return found;
   }
 
@@ -2641,11 +2657,17 @@
       ? `⚠ Bu faturada ${failedCount} tutarsızlık bulundu:`
       : (realCount ? `✓ Yapılan ${realCount} kontrolün hepsi başarılı:` : 'ℹ Bilgi notu:');
 
+    // Özet kutusu (iskonto vb.) bu faturadan okunduysa, nereden okunduğunu
+    // PDF üzerinde gösteren düğme (bkz. openSummaryVisual).
+    validationBoxRow = row;
+    const canShowSummary = !!(row.summary && row.summary.lines && row.summary.lines.length);
     box.innerHTML = `<div class="${boxClass}"><b>${title}</b><ul>` +
       checks.map(c => c.info
         ? `<li class="check-info">⚠ ${escapeHtml(c.text)}</li>`
         : `<li class="${c.ok ? 'check-ok' : 'check-fail'}">${c.ok ? '✓' : '✗'} ${escapeHtml(c.text)}</li>`).join('') +
-      '</ul></div>';
+      '</ul>' +
+      (canShowSummary ? '<button class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="openSummaryVisual()">👁 Özet kutusunda nereden okundu?</button>' : '') +
+      '</div>';
   }
 
   function renderInspector() {
@@ -4009,6 +4031,10 @@
   }
 
   let currentLineItemTable = null; // panoya kopyalama için son çıkarılan tablo
+  // Açık olan modalın satır indeksi — 👁 Görsel Doğrulama, kalem tablosu
+  // BULUNAMASA bile özet kutusunun yerini çizebilsin diye (satırın özetine
+  // ve dosyasına buradan ulaşıyor).
+  let currentLineItemIndex = -1;
 
   async function openLineItemTable(index) {
     const file = lastFiles[index];
@@ -4026,6 +4052,7 @@
     document.getElementById('lineItemCopyBtn').disabled = true;
     document.getElementById('lineItemVisualBtn').disabled = true;
     currentLineItemTable = null;
+    currentLineItemIndex = index;
 
     let pdf = null;
     try {
@@ -4034,8 +4061,11 @@
       const table = await detectLineItemTable(pdf);
 
       if (!table) {
+        const hasSummary = !!(row && row.summary && row.summary.lines && row.summary.lines.length);
         document.getElementById('lineItemBody').innerHTML =
-          '<p style="padding:16px; color:var(--text-muted);">Kalem tablosu bulunamadı. Bu genelde faturanın taranmış/vektör-çizim tabanlı olduğu (metin katmanı yok ya da "Sıra"/"Sıra No" başlığı farklı yazılmış) anlamına gelir.</p>';
+          '<p style="padding:16px; color:var(--text-muted);">Kalem tablosu bulunamadı. Bu genelde faturanın taranmış/vektör-çizim tabanlı olduğu (metin katmanı yok ya da "Sıra"/"Sıra No" başlığı farklı yazılmış) anlamına gelir.' +
+          (hasSummary ? ' Ama faturanın altındaki <b>özet kutusu</b> bulundu — 👁 Görsel Doğrulama ile PDF üzerinde nereden okunduğunu görebilirsiniz.' : '') + '</p>';
+        if (hasSummary) document.getElementById('lineItemVisualBtn').disabled = false;
         return;
       }
 
@@ -4194,6 +4224,68 @@
     });
   }
 
+  const SUMMARY_TAGS = { iskonto: 'İskonto', yuvarlama: 'Yuvarlama', malHizmet: 'Mal/Hizmet', vergiDahil: 'Vergiler Dahil', odenecek: 'Ödenecek', kdv: 'KDV', kdvTevkifat: 'KDV Tevkifat' };
+
+  // Özet kutusunda okunan BİR satırı (bkz. extractSummaryBlock `lines`) sayfa
+  // üzerine çizer: etiket soluk dolgu, ALINAN değer koyu çerçeve, ikisi noktalı
+  // çizgiyle bağlı, yanında "ne okundu" etiketi (ör. "İskonto = 448,83").
+  // İskonto satırı kırmızı, diğerleri mor — kullanıcı bir tutarın PDF'te tam
+  // olarak hangi satırdan alındığını gözle doğrulayabilsin diye.
+  function drawSummaryLine(ctx, viewport, l, scale) {
+    const rgb = l.id === 'iskonto' ? '220,38,38' : '147,51,234';
+    const yTop = l.y + l.h * 0.95, yBot = l.y - l.h * 0.25;
+    const rect = (x0, x1) => {
+      const [ax, ay] = viewport.convertToViewportPoint(x0, yTop);
+      const [bx, by] = viewport.convertToViewportPoint(x1, yBot);
+      return [Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay)];
+    };
+    const [lx, ly, lw, lh] = rect(l.labelBox.x0, l.labelBox.x1);
+    const [vx, vy, vw, vh] = rect(l.valueBox.x0, l.valueBox.x1);
+
+    ctx.fillStyle = `rgba(${rgb},0.16)`;
+    ctx.fillRect(lx - 2, ly - 1, lw + 4, lh + 2);
+    ctx.fillStyle = `rgba(${rgb},0.28)`;
+    ctx.fillRect(vx - 2, vy - 1, vw + 4, vh + 2);
+    ctx.strokeStyle = `rgba(${rgb},0.95)`;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(vx - 2, vy - 1, vw + 4, vh + 2);
+
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(lx + lw + 2, ly + lh / 2);
+    ctx.lineTo(vx - 2, vy + vh / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const tag = `${SUMMARY_TAGS[l.id] || l.id}${l.rate !== undefined ? ' %' + l.rate : ''} = ${fmtNum(l.value)}`;
+    const fs = Math.round(6.5 * scale) + 2;
+    ctx.font = `bold ${fs}px sans-serif`;
+    const tw = ctx.measureText(tag).width + 8;
+    let tx = lx - tw - 6; // önce etiketin SOLUNA (özet genelde sağa yaslı)
+    if (tx < 2) tx = Math.min(vx + vw + 8, ctx.canvas.width - tw - 2);
+    tx = Math.max(2, tx);
+    const ty = ly + lh / 2 - (fs + 4) / 2;
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillRect(tx, ty, tw, fs + 4);
+    ctx.strokeStyle = `rgba(${rgb},0.95)`;
+    ctx.strokeRect(tx, ty, tw, fs + 4);
+    ctx.fillStyle = `rgb(${rgb})`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(tag, tx + 4, ty + (fs + 4) / 2);
+  }
+
+  // Doğrulama kutusundaki "👁 nereden okundu?" düğmesi: kutuda gösterilen
+  // satırı bulup kalem modalını açar ve doğrudan Görsel Doğrulama'ya geçer.
+  // İndeksi TIKLAMA ANINDA hesaplıyoruz (sıralama satır indekslerini değiştirir).
+  let validationBoxRow = null;
+  async function openSummaryVisual() {
+    const index = rows.indexOf(validationBoxRow);
+    if (index < 0) return;
+    await openLineItemTable(index);
+    if (!document.getElementById('lineItemVisualBtn').disabled) toggleLineItemVisual();
+  }
+
   // Görsel doğrulama ("boncuk"): tespit edilen sütun sınırlarını (mavi dikey
   // çizgiler), başlık bandını (turuncu) ve her satırın algılanan sınırlarını
   // (yeşil, açık/koyu dönüşümlü) render edilmiş sayfanın ÜZERİNE çizer — bu
@@ -4211,60 +4303,87 @@
       btn.textContent = '👁 Görsel Doğrulama';
       return;
     }
-    if (!currentLineItemTable) return;
+    // Kalem tablosu BULUNAMASA bile özet kutusu bulunduysa çizilebilir.
+    const table = currentLineItemTable;
+    const vRow = rows[currentLineItemIndex];
+    const summaryLines = (vRow && vRow.summary && vRow.summary.lines) || [];
+    if (!table && !summaryLines.length) return;
 
     btn.disabled = true;
     body.style.display = 'none';
     wrap.style.display = '';
     wrap.innerHTML = '<p style="padding:16px; color:var(--text-muted);">Render ediliyor...</p>';
-    btn.textContent = '📋 Tabloya Dön';
+    btn.textContent = table ? '📋 Tabloya Dön' : '↩ Geri Dön';
 
     let pdf = null;
     try {
-      const buf = await currentLineItemTable.file.arrayBuffer();
+      const file = table ? table.file : lastFiles[currentLineItemIndex];
+      const buf = await file.arrayBuffer();
       pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-      const page = await pdf.getPage(currentLineItemTable.pageNo);
       const scale = 1.8;
-      const canvas = await renderPageToCanvas(page, scale);
-      const viewport = page.getViewport({ scale });
-      const ctx = canvas.getContext('2d');
+      // Kalem tablosunun ve özet satırlarının bulunduğu sayfaların HEPSİ çizilir
+      // (genelde aynı sayfa; çok sayfalı faturada özet son sayfada olabilir).
+      const pageNos = [...new Set([...(table ? [table.pageNo] : []), ...summaryLines.map(l => l.page)])].sort((a, b) => a - b);
 
-      const { colStartX, headerBandTop, headerBandBottom, rowBounds } = currentLineItemTable.debug;
-      const pageLeft = page.view[0];
-      const pageRight = page.view[2];
-      const lastYBottom = rowBounds.length ? rowBounds[rowBounds.length - 1].yBottom : headerBandBottom;
+      const legend = [];
+      if (table) legend.push('🟧 Başlık bandı', '🟩 Tespit edilen satırlar', '🔵 Sütun sınırları');
+      if (summaryLines.length) legend.push('🟪 Özet kutusu (soluk = etiket, koyu çerçeve = ALINAN değer)', '🟥 Toplam İskonto');
+      wrap.innerHTML = `<p style="font-size:11px; color:var(--text-muted); padding:6px; margin:0;">${legend.join(' &nbsp;·&nbsp; ')}</p>`;
 
-      const drawBand = (yTop, yBottom, fillColor) => {
-        const [x0, vTop] = viewport.convertToViewportPoint(pageLeft, yTop);
-        const [x1, vBottom] = viewport.convertToViewportPoint(pageRight, yBottom);
-        ctx.fillStyle = fillColor;
-        ctx.fillRect(x0, vTop, x1 - x0, vBottom - vTop);
-        ctx.strokeStyle = 'rgba(15,23,42,0.35)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x0, vTop, x1 - x0, vBottom - vTop);
-      };
+      for (const pageNo of pageNos) {
+        const page = await pdf.getPage(pageNo);
+        const canvas = await renderPageToCanvas(page, scale);
+        const viewport = page.getViewport({ scale });
+        const ctx = canvas.getContext('2d');
 
-      drawBand(headerBandTop, headerBandBottom, 'rgba(245,158,11,0.22)'); // 🟧 başlık
-      rowBounds.forEach((b, i) => {
-        drawBand(b.yTop, b.yBottom, i % 2 === 0 ? 'rgba(16,185,129,0.14)' : 'rgba(16,185,129,0.28)'); // 🟩 satırlar
-      });
+        if (table && pageNo === table.pageNo) {
+          const { colStartX, headerBandTop, headerBandBottom, rowBounds } = table.debug;
+          const pageLeft = page.view[0];
+          const pageRight = page.view[2];
+          const lastYBottom = rowBounds.length ? rowBounds[rowBounds.length - 1].yBottom : headerBandBottom;
 
-      // Sütun sınırları (dikey mavi çizgiler)
-      ctx.strokeStyle = 'rgba(37,99,235,0.9)';
-      ctx.lineWidth = 2;
-      colStartX.forEach(x => {
-        const [vx, vTop] = viewport.convertToViewportPoint(x, headerBandTop);
-        const [, vBottom] = viewport.convertToViewportPoint(x, lastYBottom);
-        ctx.beginPath();
-        ctx.moveTo(vx, vTop);
-        ctx.lineTo(vx, vBottom);
-        ctx.stroke();
-      });
+          const drawBand = (yTop, yBottom, fillColor) => {
+            const [x0, vTop] = viewport.convertToViewportPoint(pageLeft, yTop);
+            const [x1, vBottom] = viewport.convertToViewportPoint(pageRight, yBottom);
+            ctx.fillStyle = fillColor;
+            ctx.fillRect(x0, vTop, x1 - x0, vBottom - vTop);
+            ctx.strokeStyle = 'rgba(15,23,42,0.35)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x0, vTop, x1 - x0, vBottom - vTop);
+          };
 
+          drawBand(headerBandTop, headerBandBottom, 'rgba(245,158,11,0.22)'); // 🟧 başlık
+          rowBounds.forEach((b, i) => {
+            drawBand(b.yTop, b.yBottom, i % 2 === 0 ? 'rgba(16,185,129,0.14)' : 'rgba(16,185,129,0.28)'); // 🟩 satırlar
+          });
+
+          // Sütun sınırları (dikey mavi çizgiler)
+          ctx.strokeStyle = 'rgba(37,99,235,0.9)';
+          ctx.lineWidth = 2;
+          colStartX.forEach(x => {
+            const [vx, vTop] = viewport.convertToViewportPoint(x, headerBandTop);
+            const [, vBottom] = viewport.convertToViewportPoint(x, lastYBottom);
+            ctx.beginPath();
+            ctx.moveTo(vx, vTop);
+            ctx.lineTo(vx, vBottom);
+            ctx.stroke();
+          });
+        }
+
+        // 🟪 Özet kutusu: bu sayfadaki her okunan satır — etiket (soluk dolgu),
+        // ALINAN değer (koyu çerçeve) ve "ne okundu" etiketi. İskonto kırmızı.
+        summaryLines.filter(l => l.page === pageNo).forEach(l => drawSummaryLine(ctx, viewport, l, scale));
+
+        canvas.style.maxWidth = '100%';
+        if (pageNos.length > 1) {
+          const cap = document.createElement('p');
+          cap.style.cssText = 'font-size:11px; color:var(--text-muted); margin:6px 0 2px;';
+          cap.textContent = `Sayfa ${pageNo}`;
+          wrap.appendChild(cap);
+        }
+        wrap.appendChild(canvas);
+      }
       pdf.destroy();
-      canvas.style.maxWidth = '100%';
-      wrap.innerHTML = '<p style="font-size:11px; color:var(--text-muted); padding:6px; margin:0;">🟧 Başlık bandı &nbsp;·&nbsp; 🟩 Tespit edilen satırlar &nbsp;·&nbsp; 🔵 Sütun sınırları</p>';
-      wrap.appendChild(canvas);
     } catch (err) {
       console.error(err);
       wrap.innerHTML = `<p style="padding:16px; color:var(--danger);">Hata: ${escapeHtml(err.message || String(err))}</p>`;
