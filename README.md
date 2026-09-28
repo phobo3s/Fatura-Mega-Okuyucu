@@ -209,14 +209,15 @@ girmez (`.gitignore`). Uygulama bu dosyalar yokken de sorunsuz açılır
   karekoddaki "Mal/Hizmet Tutarı" ile birebir eşleşmemesi (iskonto öncesi/
   sonrası veya KDV dahil/hariç fiyatlandırma farkı gibi) gerçek bir
   muhasebe nüansı olabilir, illa hata anlamına gelmez.
-- **Kalem tablosu, e-SMM (Serbest Meslek Makbuzu) için tasarlanmadı:**
-  Özellik "Sıra No" tablolu **e-Fatura** için geliştirilip test edildi.
-  e-SMM makbuzlarının tablo yapısı tamamen farklı (Brüt Ücret / Net Ücret /
-  Net Tahsilat, hiç "Tutar" sütunu yok) ve bazı vendor'larda özet metni veri
-  satırına karışıp kalem tablosunu bozuk gösterebilir. e-SMM'nin kendi
-  matematiksel doğrulaması (bkz. yukarıdaki kurallar) zaten doğrudan QR
-  verisinden çalışıyor ve bundan etkilenmez — kalem tablosu e-SMM'de
-  yalnızca "bonus" bir gösterimdir, ana sonucu etkilemez.
+- **Kalem tablosu, e-SMM (Serbest Meslek Makbuzu) için de çalışır, ama farklı bir
+  tutarla karşılaştırır:** e-SMM makbuzlarının tablo yapısı e-Fatura'dan tamamen
+  farklı (Brüt Ücret / Net Ücret / Net Tahsilat, hiç "Mal/Hizmet Tutarı" yok) —
+  kalem tablosu bulunursa son sütun toplamı **Net Tahsilat** ile karşılaştırılır
+  (e-Fatura'da Mal/Hizmet Tutarı ile). Gerçek örneklerle doğrulandı (25/25 birebir
+  örtüşüyor). e-SMM'nin kendi matematiksel doğrulaması (bkz. yukarıdaki kurallar)
+  zaten doğrudan QR verisinden çalışıyor ve kalem tablosundaki sorunlardan
+  etkilenmez — bazı vendor'larda özet metni veri satırına karışıp kalem tablosunu
+  bozuk gösterebilir, ama bu ana sonucu etkilemez.
 
 ---
 

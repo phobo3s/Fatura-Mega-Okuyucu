@@ -229,7 +229,7 @@
             <button class="btn btn-sm btn-secondary" onclick="refreshAll()">🔄 Yenile</button>
             <button class="btn btn-sm btn-secondary" onclick="copyToClipboard()">📋 Panoya Kopyala</button>
             <button class="btn btn-sm" onclick="exportToCSV()">📥 CSV İndir</button>
-            <button class="btn btn-sm btn-secondary" onclick="runBulkLineItemCheck()" title="Her faturanın kalem tablosunu bulup, kalemlerin toplamının Mal/Hizmet Tutarı ile örtüşüp örtüşmediğini toplu kontrol eder">🧾 Kalem Kontrolü (Tümü)</button>
+            <button class="btn btn-sm btn-secondary" onclick="runBulkLineItemCheck()" title="Her faturanın kalem tablosunu bulup, kalemlerin toplamının beklenen tutarla (e-Fatura'da Mal/Hizmet Tutarı, e-SMM'de Net Tahsilat) örtüşüp örtüşmediğini toplu kontrol eder">🧾 Kalem Kontrolü (Tümü)</button>
             <button class="btn btn-sm btn-secondary" onclick="copyAllLineItemsToClipboard()" title="Her faturanın kalem tablosunu bulup, her satırın başına fatura adını ekleyerek TEK bir panoya kopyalar">📊 Kalemleri Toplu Kopyala</button>
           </div>
           <div class="filename-width-control">
@@ -2747,13 +2747,13 @@
       } else if (lic.status === 'not_found') {
         kalemCell = `<span class="badge badge-none" title="Kalem tablosu bulunamadı (taranmış/vektör-çizim PDF ya da farklı bir tablo yapısı olabilir)">Yok</span>`;
       } else if (lic.status === 'no_compare') {
-        kalemCell = `<span class="badge badge-ok" title="Kalem tablosu bulundu ama karşılaştırılacak Mal/Hizmet Tutarı yok">Bulundu</span>`;
+        kalemCell = `<span class="badge badge-ok" title="Kalem tablosu bulundu ama karşılaştırılacak ${escapeHtml(lineItemTargetLabel(row))} yok">Bulundu</span>`;
       } else if (lic.status === 'ok') {
         kalemCell = lic.iskonto !== undefined
-          ? `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) = Mal/Hizmet Tutarı (${fmtNum(lic.target)}) − Toplam İskonto (${fmtNum(lic.iskonto)}) — QR'daki tutar iskonto öncesi">✓</span>`
-          : `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) Mal/Hizmet Tutarı (${fmtNum(lic.target)}) ile örtüşüyor">✓</span>`;
+          ? `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) = ${lic.targetLabel} (${fmtNum(lic.target)}) − Toplam İskonto (${fmtNum(lic.iskonto)}) — QR'daki tutar iskonto öncesi">✓</span>`
+          : `<span class="badge badge-ok" title="Kalem toplamı (${fmtNum(lic.sum)}) ${lic.targetLabel} (${fmtNum(lic.target)}) ile örtüşüyor">✓</span>`;
       } else {
-        kalemCell = `<span class="badge badge-none" title="Kalem toplamı (${fmtNum(lic.sum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(lic.target)}) — fark: ${fmtNum(lic.diff)}">⚠</span>`;
+        kalemCell = `<span class="badge badge-none" title="Kalem toplamı (${fmtNum(lic.sum)}) ≠ ${lic.targetLabel} (${fmtNum(lic.target)}) — fark: ${fmtNum(lic.diff)}">⚠</span>`;
       }
       tdContent += `<td onclick="event.stopPropagation();" style="cursor:pointer;" title="Kalem tablosunu incele">${kalemCell}<button class="rescan-btn" onclick="openLineItemTable(${index})">📋</button></td>`;
 
@@ -4288,7 +4288,15 @@
       // sütununa düşülüyordu. Yaygın döviz kodlarının hepsini temizliyoruz.
       const cleaned = raw.replace(/TL|TRY|EUR|USD|GBP/gi, '').trim();
       const tokens = cleaned.split(/\s+/).filter(Boolean);
-      return parseFlexibleAmount(tokens.length ? tokens[tokens.length - 1] : cleaned);
+      // GERÇEK ÖRNEKLE BULUNDU (e-SMM makbuzu, ondalıksız yuvarlak tutar):
+      // `parseFlexibleAmount` (QR verisi için yazılmıştı, QR HER ZAMAN 2
+      // ondalık basar) tek nokta gören her sayıyı İngilizce ondalık sanıyordu
+      // — "2.500" (Türkçe binlik ayraçlı, ondalıksız 2500) böylece 2,5 okunup
+      // toplamı 1000 kat küçültüyordu. `parseTurkishNumber` (bkz. yukarıdaki
+      // İngilizce biçim düzeltmesi) noktadan sonra 1-2 hane değilse binlik
+      // ayracı sayıyor — bu tabloda kullanılan doğru kural.
+      const v = parseTurkishNumber(tokens.length ? tokens[tokens.length - 1] : cleaned);
+      return v === null ? NaN : v;
     };
 
     // GERÇEK ÖRNEKLE BULUNDU (VENDOR-L): bazı
@@ -4347,20 +4355,38 @@
     return any ? sum : null;
   }
 
-  // Kalem toplamı ↔ QR "Mal/Hizmet Tutarı" karşılaştırması. QR'daki tutar bazı
+  // Kalem tablosunun son sütununu HANGİ toplamla karşılaştırıyoruz? e-Fatura'da
+  // "Mal/Hizmet Tutarı" (QR/regex'ten). e-SMM'de bu kavram hiç yok (Brüt Ücret /
+  // Net Ücret / Net Tahsilat var, hiç "Tutar" sütunu yok) — kalem tablosunun
+  // son sütunu gerçekte "Net Tahsilat" (bkz. çok satırlı başlık birleştirme
+  // notu, CLAUDE.md): 25 e-SMM faturasından karekodu bilinen HEPSİNDE birebir
+  // örtüşüyor. Ayrı bir fonksiyon: hem matchLineItemSum hem "karşılaştırılacak
+  // tutar yok" mesajları AYNI etiketi kullansın diye.
+  function lineItemTargetLabel(row) {
+    return row.docType === 'ESMM' ? 'Net Tahsilat' : 'Mal/Hizmet Tutarı';
+  }
+
+  // Kalem toplamı ↔ karşılaştırılacak toplam. QR'daki e-Fatura tutarı bazı
   // faturalarda iskonto ÖNCESİ brüt, kalemler/matrah iskonto SONRASI (akaryakıt
   // ailesindeki 25 "uyuşmazlığın" gerçek nedeni buydu) — bu yüzden faturanın
   // altında BASILI "Toplam İskonto" varsa (row.summary.iskonto) `Mal/Hizmet −
-  // İskonto` da kabul ediliyor. Karşılaştırılamıyorsa null döner.
+  // İskonto` da kabul ediliyor (e-SMM'de bu iskonto kavramı yok, uygulanmaz).
+  // Karşılaştırılamıyorsa null döner.
   function matchLineItemSum(row, sum) {
-    const target = parseTurkishNumber(row.fields.malHizmet);
+    const isEsmm = row.docType === 'ESMM';
+    const targetLabel = lineItemTargetLabel(row);
+    const target = isEsmm
+      ? parseTurkishNumber((row.extraFields || {})['Net Tahsilat'])
+      : parseTurkishNumber(row.fields.malHizmet);
     if (sum === null || target === null) return null;
-    if (Math.abs(sum - target) <= VALIDATION_EPS) return { ok: true, target };
-    const isk = row.summary ? row.summary.iskonto : undefined;
-    if (isk !== undefined && isk > VALIDATION_EPS && Math.abs(sum - (target - isk)) <= VALIDATION_EPS) {
-      return { ok: true, target, iskonto: isk };
+    if (Math.abs(sum - target) <= VALIDATION_EPS) return { ok: true, target, targetLabel };
+    if (!isEsmm) {
+      const isk = row.summary ? row.summary.iskonto : undefined;
+      if (isk !== undefined && isk > VALIDATION_EPS && Math.abs(sum - (target - isk)) <= VALIDATION_EPS) {
+        return { ok: true, target, targetLabel, iskonto: isk };
+      }
     }
-    return { ok: false, target };
+    return { ok: false, target, targetLabel };
   }
 
   let currentLineItemTable = null; // panoya kopyalama için son çıkarılan tablo
@@ -4413,18 +4439,19 @@
       document.getElementById('lineItemBody').innerHTML = html;
       document.getElementById('lineItemCopyBtn').disabled = false;
 
-      // Olası çapraz kontrol: son sütun toplamı ile Mal/Hizmet Tutarı örtüşüyor mu?
+      // Olası çapraz kontrol: son sütun toplamı ile beklenen toplam örtüşüyor
+      // mu? (e-Fatura'da Mal/Hizmet Tutarı, e-SMM'de Net Tahsilat — bkz. lineItemTargetLabel)
       const lastColSum = sumLastColumn(table);
       const m = row ? matchLineItemSum(row, lastColSum) : null;
       if (m !== null) {
         const malHizmet = m.target;
         document.getElementById('lineItemStatus').innerHTML = m.ok
           ? (m.iskonto !== undefined
-            ? `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) = Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) − Toplam İskonto (${fmtNum(m.iskonto)}) — QR'daki tutar iskonto öncesi, kalemler iskonto sonrası.</span>`
-            : `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) ile örtüşüyor.</span>`)
-          : `<span style="color:var(--danger);">⚠ Son sütun toplamı (${fmtNum(lastColSum)}) ≠ Mal/Hizmet Tutarı (${fmtNum(malHizmet)}) — fark: ${fmtNum(malHizmet - lastColSum)}. Son sütun bu vendor'da "satır tutarı" olmayabilir, ya da tablo yanlış çıkarılmış olabilir.</span>`;
+            ? `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) = ${m.targetLabel} (${fmtNum(malHizmet)}) − Toplam İskonto (${fmtNum(m.iskonto)}) — QR'daki tutar iskonto öncesi, kalemler iskonto sonrası.</span>`
+            : `<span style="color:var(--success);">✓ Son sütun toplamı (${fmtNum(lastColSum)}) ${m.targetLabel} (${fmtNum(malHizmet)}) ile örtüşüyor.</span>`)
+          : `<span style="color:var(--danger);">⚠ Son sütun toplamı (${fmtNum(lastColSum)}) ≠ ${m.targetLabel} (${fmtNum(malHizmet)}) — fark: ${fmtNum(malHizmet - lastColSum)}. Son sütun bu vendor'da "satır tutarı" olmayabilir, ya da tablo yanlış çıkarılmış olabilir.</span>`;
       } else if (lastColSum !== null) {
-        document.getElementById('lineItemStatus').textContent = `Son sütun toplamı: ${fmtNum(lastColSum)} (karşılaştırılacak Mal/Hizmet Tutarı bulunamadı)`;
+        document.getElementById('lineItemStatus').textContent = `Son sütun toplamı: ${fmtNum(lastColSum)} (karşılaştırılacak ${lineItemTargetLabel(row)} bulunamadı)`;
       }
     } catch (err) {
       console.error(err);
@@ -4440,7 +4467,7 @@
 
   // "🧾 Kalem Kontrolü (Tümü)" — tek tek satır satır 📋'ye basıp bakmak
   // yerine, YÜKLENEN HER FATURADA kalem tablosunu bulup son sütun toplamını
-  // Mal/Hizmet Tutarı ile karşılaştırıyor, sonucu yeni "Kalem Kontrolü"
+  // beklenen tutarla (bkz. lineItemTargetLabel) karşılaştırıyor, sonucu yeni "Kalem Kontrolü"
   // sütununa (✓/⚠/Yok/Bulundu rozeti) yazıyor — tüm faturaların durumunu
   // tek bakışta görmek için. Her dosya için ayrı bir canvas render + piksel
   // taraması gerektiği için (çizgi tespiti) biraz sürebilir, bu yüzden
@@ -4475,7 +4502,7 @@
           if (m === null) {
             row.lineItemCheck = { status: 'no_compare', sum };
           } else {
-            row.lineItemCheck = { status: m.ok ? 'ok' : 'mismatch', sum, target: m.target, diff: m.target - sum, iskonto: m.iskonto };
+            row.lineItemCheck = { status: m.ok ? 'ok' : 'mismatch', sum, target: m.target, targetLabel: m.targetLabel, diff: m.target - sum, iskonto: m.iskonto };
           }
         }
       } catch (err) {
