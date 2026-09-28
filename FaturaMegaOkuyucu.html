@@ -3610,7 +3610,7 @@
         if (parts.length === 2 && parts.every(p => /^\d$/.test(p))) return parts.join('');
         return str;
       };
-      const items = tc.items.map(it => ({ str: collapseLetterSpacing(it.str), x: it.transform[4], y: it.transform[5], h: it.height }))
+      const items = tc.items.map(it => ({ str: collapseLetterSpacing(it.str), x: it.transform[4], y: it.transform[5], h: it.height, w: it.width }))
         .filter(it => it.str.trim() !== ''
           && !/ETTN|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(it.str)
           && !/^\d{1,2}:\d{2}:\d{2}(\.\d+)?(\+\d{2}:\d{2})?$/.test(it.str.trim())
@@ -3831,6 +3831,61 @@
         else { clusters.push(cur); cur = [sortedHx[i]]; }
       }
       clusters.push(cur);
+
+      // ÇOK SATIRLI BAŞLIK BİRLEŞTİRME (kullanıcı fark etti; gerçek örnekle doğrulandı
+      // — bkz. CLAUDE.md). Sağa yaslı/ortalı çok satırlı bir başlık ("Mal Hizmet" /
+      // "Tutarı") üst ve alt satırda FARKLI x'te başlar; yukarıdaki "başladığı x'e göre
+      // kümeleme" bunları iki AYRI sütun sanıyor — dar bir "sliver" sütun oluşup
+      // değerlerin ortasından geçiyor, başlık ikiye bölünüyor. Korpusta 274 tablonun
+      // ~150'sini etkiliyordu (274 dosyalık taban kayıtla ölçüldü). VERİYE bakan bir
+      // "boşluk deseniyle" birleştirme daha önce denenip reddedilmişti (gerçekten boş
+      // ayrı bir sütunu karıştırma riski) — burada VERİYE HİÇ BAKMIYORUZ, sadece
+      // başlığın GEOMETRİSİNE: gerçek sütunlar yan yana, birbirinden AYRIK x
+      // şeritleridir; bir sütunun başlığı diğerinin başlık metninin ALTINA/ÜSTÜNE
+      // girmez. İki komşu küme, (1) hiçbir zaman AYNI satırda (baseline) görünmüyorsa
+      // VE (2) birinin metni diğerinin kapladığı x aralığının TAMAMEN İÇİNDE
+      // kalıyorsa (kısa parça uzun parçanın altında/üstünde) VE (3) başlangıçları
+      // 40 birimden yakınsa, tek sütunun alt alta iki/üç satırıdır.
+      //
+      // GERÇEK ÖRNEKLE BULUNDU (ilk denemede 20 tabloyu bozdu): (2) "başlangıcı
+      // içine giriyor" diye gevşek yazılınca, dar "Sıra No" sütununun TAŞAN başlığı
+      // yandaki "Mal Hizmet"in başladığı x'e girip iki AYRI sütunu tek hücrede
+      // karıştırdı ("1 Posta Hizmet Geliri"). Taşan metin komşunun BAŞINA girer ama
+      // komşunun metni onun İÇİNDE kalmaz — bu yüzden TAM KAPSAMA şartı.
+      //
+      // İKİNCİ GERÇEK ÖRNEKLE BULUNDU (kullanıcının verdiği dosya, bir e-SMM makbuzu):
+      // tam kapsama şartı bile yetmiyor — tabloyla HİÇ ilgisi olmayan bir metin satırı
+      // ("EDİLDİ", muhtemelen "Tahsil Edildi mi" gibi bir notun parçası) başlık
+      // bandına kazayla düşüp yanındaki gerçek "G.V. Stopaj Oranı %" sütununu
+      // YANLIŞLIKLA içine alıyordu — çünkü bu öğenin GENİŞLİĞİ (173 birim, 6 harf)
+      // anormaldi: aynı sayfadaki HER gerçek başlık kelimesi harf başına ~3-4 birim
+      // iken bu ~29 birim, yani ~8 kat fazla (muhtemelen görsel hizalama için verilmiş
+      // geniş bir karakter aralığı ya da tabloyla ilgisiz bir satırın PDF'te bıraktığı
+      // artık). Gerçek bir başlık kelimesi asla bu kadar "şişkin" olmaz. Bu yüzden
+      // GENİŞLİK SAĞLIK KONTROLÜ eklendi: birleşecek iki kümenin HİÇBİR öğesi harf
+      // başına 10 birimi aşmasın (korpustaki EN GENİŞ gerçek başlık kelimesi bile
+      // ~4 birim/harf — 10, bol bir güvenlik payı bırakıyor, "EDİLDİ"nin ~29
+      // birim/harf'ini rahatça eler).
+      const HARF_GENISLIK_TAVANI = 10;
+      const gecerliGenislik = it => !it.w || !it.str.length || (it.w / it.str.length) <= HARF_GENISLIK_TAVANI;
+      const mergeStackedHeaderClusters = () => {
+        const clusterIdx = it => clusters.findIndex(c => c.includes(Math.round(it.x)));
+        const inside = (s, l) => s.x >= l.x - 3 && s.x + (s.w || 0) <= l.x + (l.w || 0) + 3;
+        for (let k = 0; k + 1 < clusters.length; k++) {
+          const A = headerItems.filter(it => clusterIdx(it) === k);
+          const B = headerItems.filter(it => clusterIdx(it) === k + 1);
+          if (!A.length || !B.length) continue;
+          if (!A.every(gecerliGenislik) || !B.every(gecerliGenislik)) continue; // şüpheli genişlikte öğe varsa dokunma
+          const sameLine = A.some(a => B.some(b => Math.abs(a.y - b.y) <= 2));
+          const overlaps = A.some(a => B.some(b => inside(b, a) || inside(a, b)));
+          const near = Math.min(...B.map(b => b.x)) - Math.min(...A.map(a => a.x)) < 40;
+          if (!sameLine && overlaps && near) {
+            clusters.splice(k, 2, [...clusters[k], ...clusters[k + 1]]);
+            k--; // birleşen kümeyi bir sonrakiyle de karşılaştır (3+ satırlı başlık)
+          }
+        }
+      };
+      mergeStackedHeaderClusters();
       let colStartX = clusters.map(c => c[0]);
 
       // ÇİZGİ TABANLI İYİLEŞTİRME (gerçek örnekle doğrulandı — bkz.
@@ -4162,17 +4217,14 @@
 
       const dataRows = rowBounds.map(b => repairNumberBleed(bucketRow(b.yTop, b.yBottom)));
 
-      // DENENDİ, GERİ ALINDI: sağa yaslı çok satırlı son sütun başlığının
-      // (ör. "Malzeme/Hizmet" + "Tutarı" diye ikiye bölünmesi, VENDOR-I
-      // ailesi + VENDOR-N) "boşluk" desenine bakarak (hep boş / karşılıklı
-      // dışlama) otomatik birleştirilmesi denendi. Kullanıcı haklı olarak
-      // reddetti: ORTA bir sütun (ör. İskonto Tutarı, uygulanmadıysa) da
-      // tamamen meşru şekilde boş olabilir — küçük örneklemden (1-3 satır)
-      // "boşluk" çıkarıp buna göre birleştirmek, gerçekte İKİ FARKLI sütunu
-      // yanlışlıkla TEK hücrede karıştırma riski taşıyor (veri kaybı/
-      // karışması, kozmetik bir başlık kusurundan çok daha kötü). Bu yüzden
-      // sağa-yaslı-başlık-bölünmesi kozmetik bir SINIRLAMA olarak bırakıldı,
-      // veriyle (colStartX/dataRows) OYNANMIYOR — bkz. README Sınırlamalar.
+      // ✅ ÇÖZÜLDÜ (yukarıda, `mergeStackedHeaderClusters`) — sağa yaslı çok
+      // satırlı başlığın (ör. "Malzeme/Hizmet" + "Tutarı") iki AYRI sütun
+      // sanılıp bölünmesi. İLK DENEME (bu yorumun eski hâli) VERİYE bakan bir
+      // "boşluk" deseniyle birleştirmeyi öneriyordu; kullanıcı haklı olarak
+      // reddetti (ORTA bir sütun da meşru şekilde boş olabilir, karışma
+      // riski kozmetik kusurdan kötü). Kalıcı çözüm VERİYE HİÇ BAKMIYOR,
+      // sadece başlığın GEOMETRİSİNE (ayrıntı ve genişlik güvenlik payı
+      // için yukarıdaki `mergeStackedHeaderClusters` yorumuna bkz.).
 
       // 'debug' alanı: sadece görsel doğrulama (👁 butonu) için — sütun/satır
       // sınırlarını render edilmiş sayfanın üzerine çizebilmek için gerekli
