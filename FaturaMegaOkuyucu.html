@@ -4164,6 +4164,20 @@
       // çizgi özet metninin üstündeyse (y >= summaryLine.y) güveniyoruz;
       // değilse bu çizgi özetin İÇİNDE bir yerde demektir, reddedip
       // anahtar-kelime tahminine düşüyoruz.
+      //
+      // DENENDİ, GERİ ALINDI — bir e-SMM vendor ailesinde ("Brüt Ücret: 2.500 TL"
+      // gibi tablo ile özet ARASINA sıkışan kısa bir "Ödeme Bilgisi" kutusu,
+      // kullanıcı fark etti) "gerçek bir sütun başlığı ASLA iki nokta üst
+      // üste (':') ile bitmez" varsayımıyla bu tür etiketleri de sınır
+      // tespitine (SADECE sınıra, hücre içeriği filtresine değil) eklemek
+      // denendi. GERÇEK ÖRNEKLE YANLIŞ ÇIKTI: bir uçak bileti/acenta
+      // faturasında "Alan Vergisi:" (havaalanı harcı açıklaması) GERÇEK bir
+      // kalem açıklaması olarak İKİ NOKTA İLE BİTİYOR — varsayım yanlıştı.
+      // 274 dosyalık regresyonda 6 dosyada gerçek satırlar (biri TAMAMEN)
+      // boşaldı. TAMAMEN GERİ ALINDI. Bu vaka henüz ÇÖZÜLMEDİ —
+      // daha güvenli bir ayrım (ör. etiketin BİLİNEN bir e-SMM kavramıyla
+      // TAM eşleşmesi, rastgele herhangi bir ':'-bitişli metin değil)
+      // gerekiyor, bkz. CLAUDE.md.
       const summaryLine = items
         .filter(it => it.y < lastBound.yTop && looksLikeSummary(it.str))
         .sort((a, b) => b.y - a.y)[0]; // en yukarıdaki (ilk gelen) özet satırı
@@ -4215,7 +4229,36 @@
         return out;
       };
 
-      const dataRows = rowBounds.map(b => repairNumberBleed(bucketRow(b.yTop, b.yBottom)));
+      // GERÇEK ÖRNEKLE BULUNDU (MOBİLİZ ailesi, kullanıcı fark etti):
+      // NUMBER_BLEED'in TERS yönü. Bir hücre BOŞ kalmış (ör. Miktar), bir
+      // SONRAKİ hücrenin (ör. Birim Fiyat) BAŞINA kısa bir sayı ("1") binmiş:
+      // "1 490TRY". NUMBER_BLEED bunu yakalamıyor: (a) yön ters — NUMBER_BLEED
+      // sadece "bir ÖNCEKİ hücrenin SONUNDA" sızıntı arıyor, (b) "490TRY"
+      // ondalıksız — NUMBER_BLEED ",\d{1,6}" şart koşuyor (bu, parseTurkishNumber'a
+      // eklenen Türkçe-binlik-ayraç düzeltmesiyle AYNI sınıf format).
+      //
+      // Kural: hücre TAM OLARAK 2 boşlukla ayrılmış parçaya bölünüyorsa, İLK
+      // parça çıplak kısa bir sayıysa (1-4 haneli, Miktar'a benzer, ondalıksız)
+      // VE İKİNCİ parça KENDİ İÇİNDE (boşluksuz) rakam+para-birimi bitişikse
+      // ("490TRY", "2,645474TL" gibi), 1. parça Miktar'a sızmış sayılır.
+      // "800.000 TL" gibi meşru "sayı + boşluklu birim" hücreleri YAKALANMAZ:
+      // onların 2. parçası ("TL") tek başına, rakam İÇERMİYOR — looksLikeFusedAmount
+      // en az bir rakam şart koşuyor, "TL" bunu geçemez.
+      const looksLikeFusedAmount = s => /^-?[\d.,]+(?:TL|TRY|EUR|USD|GBP)$/i.test(s);
+      const looksLikeBareQty = s => /^\d{1,4}$/.test(s);
+      const repairLeadingNumberBleed = row => {
+        const out = row.slice();
+        for (let i = 1; i < out.length; i++) {
+          if (!looksEmptyish(out[i - 1])) continue;
+          const parts = out[i].trim().split(/\s+/).filter(Boolean);
+          if (parts.length !== 2 || !looksLikeBareQty(parts[0]) || !looksLikeFusedAmount(parts[1])) continue;
+          out[i - 1] = parts[0];
+          out[i] = parts[1];
+        }
+        return out;
+      };
+
+      const dataRows = rowBounds.map(b => repairLeadingNumberBleed(repairNumberBleed(bucketRow(b.yTop, b.yBottom))));
 
       // ✅ ÇÖZÜLDÜ (yukarıda, `mergeStackedHeaderClusters`) — sağa yaslı çok
       // satırlı başlığın (ör. "Malzeme/Hizmet" + "Tutarı") iki AYRI sütun
