@@ -461,6 +461,17 @@
     return n === null ? s : fmtNum(n);
   }
 
+  // Desteklenen para birimi KODLARI (sembol DEĞİL — TL/€/$ gibi semboller
+  // özet modülünde ayrıca ekleniyor, bkz. SUMMARY_UNIT). Kullanıcı isteğiyle
+  // TEK yerde toplandı — önceden aynı liste (TL|TRY|EUR|USD|GBP) en az 4 ayrı
+  // yerde (kalem tablosu tutar temizleme, özet birimi, "iki sayı birleşmiş
+  // mi" kontrolü, dinamik KDV alanı ayrıştırma) elle kopyalanmış tek tek
+  // yazılıyordu. Yeni bir para birimi eklemek istenirse SADECE burası
+  // değişir. Kullanıcının kendi düzenlediği e-SMM regex kurallarındaki
+  // (defaultEsmmRules) aynı liste BİLEREK ayrı bırakıldı — onlar kod sabiti
+  // değil, kullanıcı verisi/kuralı.
+  const PARA_BIRIMI_KODLARI = 'TL|TRY|EUR|USD|GBP';
+
   // ==========================================================================
   // DOĞRULAMA MODÜLÜ
   // ==========================================================================
@@ -2343,7 +2354,7 @@
   // gibi harf arası boşluklu yazımlar) — bu yüzden eşleştirme, etiketin
   // TÜM boşluk/noktalama/yüzde ifadesi silinip Türkçe harfleri katlanmış
   // ANAHTARI üzerinden yapılıyor.
-  const SUMMARY_UNIT = '(?:TL|TRY|EUR|USD|GBP|€|\\$)';
+  const SUMMARY_UNIT = '(?:' + PARA_BIRIMI_KODLARI + '|€|\\$)';
   // Tutar: Türkçe ("1.482,90") ya da İngilizce ("1,482.90" / "795.63") biçim, ardından isteğe bağlı birim.
   const SUMMARY_AMOUNT_RE = new RegExp('^-?(?:[\\d.]+,\\d{2}|[\\d,]*\\d\\.\\d{2})\\s*' + SUMMARY_UNIT + '?$', 'i');
   const SUMMARY_UNIT_ONLY_RE = new RegExp('^' + SUMMARY_UNIT + '$', 'i');
@@ -2658,7 +2669,7 @@
     // BASMAYAN özet satırları) sahte "0,00" değerine yol açıyordu. Kapanış
     // parantezini ve araya en az bir boşluk şartını zorunlu kılınca bu
     // sahte eşleşme artık oluşmuyor; gerçek tutar yoksa hiç eşleşmiyor.
-    const re = /(Hesaplanan[^%()\n]{0,45}?)\(\s*%\s*([\d.,]+)\s*\)\s+([\d.,]+)(?=\s*(?:TL|TRY|EUR|USD|GBP|\s|$))/gi;
+    const re = new RegExp('(Hesaplanan[^%()\\n]{0,45}?)\\(\\s*%\\s*([\\d.,]+)\\s*\\)\\s+([\\d.,]+)(?=\\s*(?:' + PARA_BIRIMI_KODLARI + '|\\s|$))', 'gi');
 
     for (const m of fullText.matchAll(re)) {
       const label = normalizeKdvLabel(m[1].replace(/\s+/g, ' ').trim());
@@ -3557,6 +3568,28 @@
   }
 
   async function detectLineItemTable(pdf) {
+    // --------------------------------------------------------------------
+    // SABİTLER — bu fonksiyonun tekrar eden geometrik toleransları TEK
+    // yerde toplandı (kullanıcı isteğiyle; önceden aynı kavram birden fazla
+    // yerde AYRI SAYI OLARAK yazılıyordu — ör. "8 birim kümeleme eşiği" hem
+    // kümelemede hem snap-sonrası kontrolde, kod yorumu "AYNI" diye
+    // vurguluyordu ama elle senkronize ediliyordu). Değerlerin KENDİSİ
+    // DEĞİŞMEDİ, sadece isimlendirildi — her sabitin GEREKÇESİ, kullanıldığı
+    // yerdeki "GERÇEK ÖRNEKLE BULUNDU" yorumunda duruyor, burada tekrar
+    // edilmedi. DİKKAT: SUTUN_KUMELEME_ESIGI ile CAPA_SATIR_ARAMA_GENISLIK
+    // ve VARSAYILAN_SATIR_YUKSEKLIGI TESADÜFEN aynı sayısal değere sahip
+    // olabilir (40) — bunlar KAVRAMSAL OLARAK FARKLI şeyler, kazayla TEK
+    // sabitte birleştirilmedi (biri yatay arama genişliği, diğeri dikey
+    // satır yüksekliği tahmini).
+    const SUTUN_KUMELEME_ESIGI = 8;         // iki metnin x'i bu kadar yakınsa aynı sütun sayılır
+    const HUCRE_X_PAYI = 4;                 // bucketRow'da bir hücrenin sütun sınırına göre sol/sağ payı
+    const CAPA_X_TOLERANSI = 6;             // satır/sütun içeriği çapa kelimesinin biraz SOLUNDAN başlayabilir
+    const CAPA_SATIR_ARAMA_GENISLIK = 40;   // çapa kelimesinin yanında sıra numarası aranan yatay pencere
+    const CAPA_SATIR_ARAMA_YUKSEKLIK = 5;   // aynı arama penceresinin dikey (y) toleransı
+    const CIZGI_YAPISTIRMA_TOLERANSI = 15;  // metin tahminini gerçek bir çizgiye "yapıştırmak" için üst sınır
+    const SON_SATIR_ARAMA_MESAFESI = 200;   // son satırın alt sınırını ararken en fazla aşağı inilecek mesafe
+    const VARSAYILAN_SATIR_YUKSEKLIGI = 40; // gerçek çizgi/özet bulunamazsa satır yüksekliği tahmini
+
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
       const page = await pdf.getPage(pageNo);
       const tc = await page.getTextContent();
@@ -3662,7 +3695,7 @@
           const verified = items
             .filter(it => normTRUpper(it.str) === target)
             .find(cand => items.some(it =>
-              it.y <= cand.y + 5 && it.x >= cand.x - 6 && it.x <= cand.x + 40 && /^\d{1,4}$/.test(it.str.trim())
+              it.y <= cand.y + CAPA_SATIR_ARAMA_YUKSEKLIK && it.x >= cand.x - CAPA_X_TOLERANSI && it.x <= cand.x + CAPA_SATIR_ARAMA_GENISLIK && /^\d{1,4}$/.test(it.str.trim())
             ));
           if (verified) { anchor = verified; rowNumberPattern = /^\d{1,4}$/; break; }
         }
@@ -3671,7 +3704,7 @@
 
       // 1. veri satırını İÇERİĞE göre bul (bkz. yukarıdaki yorum, madde 2).
       const belowCandidates = items
-        .filter(it => it.y <= anchor.y + 5 && it.x >= anchor.x - 6 && it.x <= anchor.x + 40)
+        .filter(it => it.y <= anchor.y + CAPA_SATIR_ARAMA_YUKSEKLIK && it.x >= anchor.x - CAPA_X_TOLERANSI && it.x <= anchor.x + CAPA_SATIR_ARAMA_GENISLIK)
         .filter(it => rowNumberPattern.test(it.str.trim()))
         .sort((a, b) => b.y - a.y);
       if (!belowCandidates.length) continue;
@@ -3827,7 +3860,7 @@
       const clusters = [];
       let cur = [sortedHx[0]];
       for (let i = 1; i < sortedHx.length; i++) {
-        if (sortedHx[i] - cur[cur.length - 1] < 8) cur.push(sortedHx[i]);
+        if (sortedHx[i] - cur[cur.length - 1] < SUTUN_KUMELEME_ESIGI) cur.push(sortedHx[i]);
         else { clusters.push(cur); cur = [sortedHx[i]]; }
       }
       clusters.push(cur);
@@ -3868,9 +3901,13 @@
       // birim/harf'ini rahatça eler).
       const HARF_GENISLIK_TAVANI = 10;
       const gecerliGenislik = it => !it.w || !it.str.length || (it.w / it.str.length) <= HARF_GENISLIK_TAVANI;
+      // NOT: SAG_TOLERANS (aşağıda, çizgi-yapıştırma bağlamında) da 3 değerinde
+      // ama bu TAMAMEN AYRI bir kavram (başlık kümelerinin üst üste binme payı) —
+      // aynı sayı tesadüf, kazayla BİRLEŞTİRİLMEDİ.
+      const BASLIK_KAPSAMA_TOLERANSI = 3;
       const mergeStackedHeaderClusters = () => {
         const clusterIdx = it => clusters.findIndex(c => c.includes(Math.round(it.x)));
-        const inside = (s, l) => s.x >= l.x - 3 && s.x + (s.w || 0) <= l.x + (l.w || 0) + 3;
+        const inside = (s, l) => s.x >= l.x - BASLIK_KAPSAMA_TOLERANSI && s.x + (s.w || 0) <= l.x + (l.w || 0) + BASLIK_KAPSAMA_TOLERANSI;
         for (let k = 0; k + 1 < clusters.length; k++) {
           const A = headerItems.filter(it => clusterIdx(it) === k);
           const B = headerItems.filter(it => clusterIdx(it) === k + 1);
@@ -3959,7 +3996,7 @@
             const diff = Math.abs(x - lx);
             if (diff < bestDiff) { bestDiff = diff; nearest = lx; }
           }
-          return (nearest !== null && bestDiff <= 15) ? Math.round(nearest) : x;
+          return (nearest !== null && bestDiff <= CIZGI_YAPISTIRMA_TOLERANSI) ? Math.round(nearest) : x;
         });
         // GERÇEK ÖRNEKLE BULUNDU (VENDOR-I, sonra VENDOR-J'da
         // DAHA HAFİF bir varyantı): iki AYRI (birbirine yakın) sütun kümesi
@@ -3973,7 +4010,7 @@
         // ayrılmamışsa o sütunu yapıştırmadan ÖNCEKİ (orijinal, metin
         // tabanlı) x'ine geri döndürüyoruz.
         for (let i = 1; i < colStartX.length; i++) {
-          if (colStartX[i] - colStartX[i - 1] < 8) colStartX[i] = preSnap[i];
+          if (colStartX[i] - colStartX[i - 1] < SUTUN_KUMELEME_ESIGI) colStartX[i] = preSnap[i];
         }
       }
 
@@ -4014,7 +4051,7 @@
         const bandItems = items.filter(it => it.y <= yTop && it.y > yBottom && !looksLikeSummary(it.str));
         return colStartX.map((x0, idx) => {
           const x1 = colStartX[idx + 1] ?? Infinity;
-          const cellItems = bandItems.filter(it => it.x >= x0 - 4 && it.x < x1 - 4).sort((a, b) => b.y - a.y || a.x - b.x);
+          const cellItems = bandItems.filter(it => it.x >= x0 - HUCRE_X_PAYI && it.x < x1 - HUCRE_X_PAYI).sort((a, b) => b.y - a.y || a.x - b.x);
           return cellItems.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
         });
       };
@@ -4057,7 +4094,7 @@
       // zaten aynı amaçla "anchor.x-6" kullanıyor — aynı payı burada da
       // uygulayarak tutarlı hale getiriyoruz.
       const rowStarts = items
-        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - 6 && it.x < nextColX - 4)
+        .filter(it => it.y <= headerBandBottom && it.x >= firstColX - CAPA_X_TOLERANSI && it.x < nextColX - HUCRE_X_PAYI)
         .filter(it => rowNumberPattern.test(it.str.trim()))
         .filter(it => it.str.trim().length >= Math.max(1, refDigitLen - 2))
         .sort((a, b) => b.y - a.y);
@@ -4146,7 +4183,7 @@
       // kullanıyoruz; yoksa eski anahtar-kelime/varsayılan-yükseklik
       // tahminine düşüyoruz.
       const realLastRowBottom = await detectLastRowBottomRawOps(
-        page, page.view[0], page.view[2], lastBound.yTop - 3, lastBound.yTop - 200
+        page, page.view[0], page.view[2], lastBound.yTop - 3, lastBound.yTop - SON_SATIR_ARAMA_MESAFESI
       );
       // GERÇEK ÖRNEKLE BULUNDU (VENDOR-Ç): bu tablonun altında GERÇEK
       // bir çizgi hiç yok — ama hemen altındaki yoğun özet ızgarasında
@@ -4186,9 +4223,9 @@
       } else if (summaryLine) {
         lastBound.yBottom = summaryLine.y + 2;
       } else {
-        lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? 40);
+        lastBound.yBottom = lastBound.yTop - (maxRowHeight ?? VARSAYILAN_SATIR_YUKSEKLIGI);
       }
-      rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - (maxRowHeight ?? 40); });
+      rowBounds.forEach(b => { if (b.yBottom === null) b.yBottom = b.yTop - (maxRowHeight ?? VARSAYILAN_SATIR_YUKSEKLIGI); });
 
       // GERÇEK ÖRNEKLE BULUNDU (VENDOR-H): bir sayısal sütunun
       // DEĞERİ, kendi başlığının solunda başlayabiliyor (ör. "Birim Fiyat"
@@ -4244,7 +4281,7 @@
       // "800.000 TL" gibi meşru "sayı + boşluklu birim" hücreleri YAKALANMAZ:
       // onların 2. parçası ("TL") tek başına, rakam İÇERMİYOR — looksLikeFusedAmount
       // en az bir rakam şart koşuyor, "TL" bunu geçemez.
-      const looksLikeFusedAmount = s => /^-?[\d.,]+(?:TL|TRY|EUR|USD|GBP)$/i.test(s);
+      const looksLikeFusedAmount = s => new RegExp('^-?[\\d.,]+(?:' + PARA_BIRIMI_KODLARI + ')$', 'i').test(s);
       const looksLikeBareQty = s => /^\d{1,4}$/.test(s);
       const repairLeadingNumberBleed = row => {
         const out = row.slice();
@@ -4329,7 +4366,7 @@
       // "68.152,83 EUR" gibi geliyor — sadece TL/TRY temizlenince "EUR" son
       // token kalıp NaN veriyor, sonra yanlışlıkla komşu (tevkifat açıklama)
       // sütununa düşülüyordu. Yaygın döviz kodlarının hepsini temizliyoruz.
-      const cleaned = raw.replace(/TL|TRY|EUR|USD|GBP/gi, '').trim();
+      const cleaned = raw.replace(new RegExp(PARA_BIRIMI_KODLARI, 'gi'), '').trim();
       const tokens = cleaned.split(/\s+/).filter(Boolean);
       // GERÇEK ÖRNEKLE BULUNDU (e-SMM makbuzu, ondalıksız yuvarlak tutar):
       // `parseFlexibleAmount` (QR verisi için yazılmıştı, QR HER ZAMAN 2
