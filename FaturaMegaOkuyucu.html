@@ -3877,8 +3877,21 @@
       // şeritleridir; bir sütunun başlığı diğerinin başlık metninin ALTINA/ÜSTÜNE
       // girmez. İki komşu küme, (1) hiçbir zaman AYNI satırda (baseline) görünmüyorsa
       // VE (2) birinin metni diğerinin kapladığı x aralığının TAMAMEN İÇİNDE
-      // kalıyorsa (kısa parça uzun parçanın altında/üstünde) VE (3) başlangıçları
-      // 40 birimden yakınsa, tek sütunun alt alta iki/üç satırıdır.
+      // kalıyorsa (kısa parça uzun parçanın altında/üstünde) VE (3) kapsayan metin
+      // bir "üst başlık" değilse (aşağıya bkz.), tek sütunun alt alta iki/üç satırıdır.
+      //
+      // ESKİDEN (3) "başlangıçlar 40 birimden yakınsa" idi — gerçek örnekle YANLIŞ
+      // çıktı: uzun bir ilk satır ("İskonto/(A)rtırım", 80 birim) + sağa yaslı kısa bir
+      // ikinci satır ("Tutarı") birbirinden 51,6 birim uzakta başlıyor, 40'ı aşınca
+      // birleşmiyor, sütun çizgisi "0,00 TL" değerlerinin ORTASINDAN geçiyordu. Tam
+      // kapsama zaten "aynı sütun" demek (iki ayrı sütun yatayda üst üste binmez), 40
+      // sabit sayısı ise keyfiydi — yerine YAPISAL bir koruma konuldu: kapsayan metnin
+      // aralığında AYNI satırda, FARKLI kümelerden iki öğe varsa (üstte "KDV", altında
+      // yan yana "Oranı" ve "Tutarı") bu bir devam satırı değil birden çok sütunu
+      // kapsayan bir ÜST BAŞLIKTIR, birleştirilmez. Bu koruma 283 tabloluk gerçek
+      // korpusta HİÇ tetiklenmedi; ama sentetik testte eski kodun üst başlıkla alt
+      // başlığı YANLIŞ birleştirdiği görüldü (gizli hata). Yanlış engelleme halinde
+      // sonuç eski "birleşmeme" davranışına düşer, yani güvenli yönde hata verir.
       //
       // GERÇEK ÖRNEKLE BULUNDU (ilk denemede 20 tabloyu bozdu): (2) "başlangıcı
       // içine giriyor" diye gevşek yazılınca, dar "Sıra No" sütununun TAŞAN başlığı
@@ -3914,12 +3927,22 @@
           if (!A.length || !B.length) continue;
           if (!A.every(gecerliGenislik) || !B.every(gecerliGenislik)) continue; // şüpheli genişlikte öğe varsa dokunma
           const sameLine = A.some(a => B.some(b => Math.abs(a.y - b.y) <= 2));
-          const overlaps = A.some(a => B.some(b => inside(b, a) || inside(a, b)));
-          const near = Math.min(...B.map(b => b.x)) - Math.min(...A.map(a => a.x)) < 40;
-          if (!sameLine && overlaps && near) {
-            clusters.splice(k, 2, [...clusters[k], ...clusters[k + 1]]);
-            k--; // birleşen kümeyi bir sonrakiyle de karşılaştır (3+ satırlı başlık)
+          if (sameLine) continue;
+          // Kapsama: iki kümenin öğelerinden biri diğerinin x aralığının İÇİNDE mi?
+          let container = null;
+          outer: for (const a of A) for (const b of B) {
+            if (inside(b, a)) { container = a; break outer; }
+            if (inside(a, b)) { container = b; break outer; }
           }
+          if (!container) continue;
+          // ÜST BAŞLIK koruması: kapsayan öğenin aralığında AYNI satırda, FARKLI kümelerden iki
+          // öğe varsa ("KDV" üstte, altında yan yana "Oranı" ve "Tutarı") bu bir devam satırı
+          // değil, birden çok sütunu kapsayan bir üst başlıktır — birleştirme.
+          const altlar = headerItems.filter(o => o !== container && inside(o, container));
+          const yanYana = altlar.some(o1 => altlar.some(o2 => o1 !== o2 && clusterIdx(o1) !== clusterIdx(o2) && Math.abs(o1.y - o2.y) <= 2));
+          if (yanYana) continue;
+          clusters.splice(k, 2, [...clusters[k], ...clusters[k + 1]]);
+          k--; // birleşen kümeyi bir sonrakiyle de karşılaştır (3+ satırlı başlık)
         }
       };
       mergeStackedHeaderClusters();
